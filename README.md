@@ -12,9 +12,11 @@
 
 ## ▶ Quickstart
 
+**Live demo:** [yuxiangcheng2002.github.io/sand-write](https://yuxiangcheng2002.github.io/sand-write/)
+
 ```bash
-git clone https://github.com/mitmedialab/CMG.git
-cd CMG
+git clone https://github.com/yuxiangcheng2002/sand-write.git
+cd sand-write
 python3 -m http.server 8000
 ```
 
