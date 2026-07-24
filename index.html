@@ -246,10 +246,11 @@
       // Gentle rolling dunes.
       float dunes = fbm(uv * 5.0) * 0.06 + fbm(uv * 12.0) * 0.025;
 
-      // Wind ripples across the surface.
-      float rippleFreq = 40.0 + fbm(uv * 3.0) * 20.0;
-      float ripples = sin(uv.x * rippleFreq + uv.y * 8.0) * 0.006;
-      ripples += sin(uv.y * 70.0 + fbm(uv * 6.0) * 4.0) * 0.003;
+      // Wind ripples — patchy and broken up so they don't read as slashing lines.
+      float rippleMask = smoothstep(0.35, 0.65, fbm(uv * 4.0));
+      float ripplePhase = uv.x * 35.0 + uv.y * 10.0 + fbm(uv * 14.0) * 8.0;
+      float ripples = sin(ripplePhase) * 0.004 * rippleMask;
+      ripples += (fbm(uv * 55.0) - 0.5) * 0.006;
 
       // Small scattered pits and mounds.
       float speckle = (noise(uv * 90.0) - 0.5) * 0.008;
