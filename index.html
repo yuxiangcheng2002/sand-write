@@ -208,6 +208,58 @@
       fragColor = vec4(h, 0.0, 0.0, 1.0);
     }`;
 
+    const FS_INIT = `#version 300 es
+    precision highp float;
+
+    in vec2 v_uv;
+    out vec4 fragColor;
+
+    uniform float u_seed;
+
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    float noise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      float a = hash(i);
+      float b = hash(i + vec2(1.0, 0.0));
+      float c = hash(i + vec2(0.0, 1.0));
+      float d = hash(i + vec2(1.0, 1.0));
+      return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+    float fbm(vec2 p) {
+      float v = 0.0;
+      float a = 0.5;
+      for (int i = 0; i < 4; i++) {
+        v += a * noise(p);
+        p *= 2.0;
+        a *= 0.5;
+      }
+      return v;
+    }
+
+    void main() {
+      vec2 uv = v_uv + u_seed * 100.0;
+
+      // Gentle rolling dunes.
+      float dunes = fbm(uv * 5.0) * 0.06 + fbm(uv * 12.0) * 0.025;
+
+      // Wind ripples across the surface.
+      float rippleFreq = 40.0 + fbm(uv * 3.0) * 20.0;
+      float ripples = sin(uv.x * rippleFreq + uv.y * 8.0) * 0.006;
+      ripples += sin(uv.y * 70.0 + fbm(uv * 6.0) * 4.0) * 0.003;
+
+      // Small scattered pits and mounds.
+      float speckle = (noise(uv * 90.0) - 0.5) * 0.008;
+
+      float h = dunes + ripples + speckle;
+      h = max(h, 0.0);
+
+      fragColor = vec4(h, 0.0, 0.0, 1.0);
+    }`;
+
     const FS_RENDER = `#version 300 es
     precision highp float;
     precision highp sampler2D;
@@ -324,6 +376,7 @@
     const progSim = createProgram(gl, VS_QUAD, FS_SIM);
     const progBrush = createProgram(gl, VS_BRUSH, FS_BRUSH);
     const progWave = createProgram(gl, VS_QUAD, FS_WAVE);
+    const progInit = createProgram(gl, VS_QUAD, FS_INIT);
     const progRender = createProgram(gl, VS_QUAD, FS_RENDER);
 
     const locSim = {
@@ -342,6 +395,10 @@
       a_position: gl.getAttribLocation(progWave, 'a_position'),
       u_height: gl.getUniformLocation(progWave, 'u_height'),
       u_waveY: gl.getUniformLocation(progWave, 'u_waveY')
+    };
+    const locInit = {
+      a_position: gl.getAttribLocation(progInit, 'a_position'),
+      u_seed: gl.getUniformLocation(progInit, 'u_seed')
     };
     const locRender = {
       a_position: gl.getAttribLocation(progRender, 'a_position'),
@@ -445,9 +502,7 @@
     }
 
     function clearHeightfield() {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, curFbo);
-      gl.clearColor(0, 0, 0, 1);
-      gl.clear(gl.COLOR_BUFFER_BIT);
+      runInitPass();
     }
 
     // ------------------------------------------------------------------
@@ -457,6 +512,14 @@
     function bindPass(program, locs) {
       gl.useProgram(program);
       bindQuad(locs.a_position);
+    }
+
+    function runInitPass() {
+      bindPass(progInit, locInit);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, curFbo);
+      gl.viewport(0, 0, simW, simH);
+      gl.uniform1f(locInit.u_seed, Math.random() * 100.0);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
     function runSimPass(time) {
