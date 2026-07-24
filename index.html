@@ -343,6 +343,30 @@
       fragColor = vec4(color, 1.0);
     }`;
 
+    const VS_PARTICLE = `#version 300 es
+    in vec2 a_pos;
+    in float a_size;
+    in float a_alpha;
+    out float v_alpha;
+    void main() {
+      v_alpha = a_alpha;
+      gl_Position = vec4(a_pos * 2.0 - 1.0, 0.0, 1.0);
+      gl_PointSize = a_size;
+    }`;
+
+    const FS_PARTICLE = `#version 300 es
+    precision highp float;
+    in float v_alpha;
+    out vec4 fragColor;
+    void main() {
+      vec2 c = gl_PointCoord - 0.5;
+      float d = length(c);
+      if (d > 0.5) discard;
+      float alpha = smoothstep(0.5, 0.0, d) * v_alpha;
+      // Bright, warm sand grain that catches light.
+      fragColor = vec4(0.98, 0.93, 0.82, alpha);
+    }`;
+
     function createShader(gl, type, source) {
       const s = gl.createShader(type);
       gl.shaderSource(s, source);
@@ -374,6 +398,7 @@
     const progWave = createProgram(gl, VS_QUAD, FS_WAVE);
     const progInit = createProgram(gl, VS_QUAD, FS_INIT);
     const progRender = createProgram(gl, VS_QUAD, FS_RENDER);
+    const progParticle = createProgram(gl, VS_PARTICLE, FS_PARTICLE);
 
     const locSim = {
       a_position: gl.getAttribLocation(progSim, 'a_position'),
@@ -401,6 +426,11 @@
       u_texel: gl.getUniformLocation(progRender, 'u_texel'),
       u_lightDir: gl.getUniformLocation(progRender, 'u_lightDir'),
       u_time: gl.getUniformLocation(progRender, 'u_time')
+    };
+    const locParticle = {
+      a_pos: gl.getAttribLocation(progParticle, 'a_pos'),
+      a_size: gl.getAttribLocation(progParticle, 'a_size'),
+      a_alpha: gl.getAttribLocation(progParticle, 'a_alpha')
     };
 
     // ------------------------------------------------------------------
@@ -654,7 +684,141 @@
     }
 
     document.getElementById('waveBtn').addEventListener('click', startWave);
-    document.getElementById('resetBtn').addEventListener('click', clearHeightfield);
+    document.getElementById('resetBtn').addEventListener('click', () => {
+      clearHeightfield();
+      seedParticles();
+    });
+
+    // ------------------------------------------------------------------
+    // Floating sand particles
+    // ------------------------------------------------------------------
+
+    const MAX_PARTICLES = 280;
+    let particles = [];
+    const pPosArr = new Float32Array(MAX_PARTICLES * 2);
+    const pSizeArr = new Float32Array(MAX_PARTICLES);
+    const pAlphaArr = new Float32Array(MAX_PARTICLES);
+
+    const pPosBuffer = gl.createBuffer();
+    const pSizeBuffer = gl.createBuffer();
+    const pAlphaBuffer = gl.createBuffer();
+
+    let windAngle = 0.35; // blowing mostly right and slightly up
+
+    function seedParticles() {
+      particles = [];
+      for (let i = 0; i < MAX_PARTICLES * 0.25; i++) {
+        const p = spawnParticle();
+        p.x = Math.random() * 1.2 - 0.1;
+        p.y = Math.random() * 1.2 - 0.1;
+        p.life = Math.random();
+        particles.push(p);
+      }
+    }
+
+    function spawnParticle() {
+      let x, y;
+      const edge = Math.random();
+      if (edge < 0.45) {
+        // blow in from the left edge
+        x = -0.04;
+        y = Math.random();
+      } else if (edge < 0.75) {
+        // blow up from the bottom edge
+        x = Math.random();
+        y = -0.04;
+      } else {
+        // occasional particle lifting off the surface
+        x = Math.random();
+        y = Math.random() * 0.7;
+      }
+
+      const speed = 0.0006 + Math.random() * 0.0012;
+      const spread = (Math.random() - 0.5) * 0.6;
+      const vx = Math.cos(windAngle + spread) * speed + 0.0012;
+      const vy = Math.sin(windAngle + spread) * speed + 0.0004;
+
+      return {
+        x, y,
+        vx, vy,
+        size: (6.0 + Math.random() * 10.0) * Math.max(1.0, Math.min(window.devicePixelRatio || 1, 2)),
+        life: 1.0,
+        decay: 0.0008 + Math.random() * 0.0015
+      };
+    }
+
+    function updateParticles() {
+      // Slowly drift wind direction.
+      windAngle += (Math.random() - 0.5) * 0.002;
+      windAngle = clamp(windAngle, 0.1, 0.8);
+
+      if (particles.length < MAX_PARTICLES && Math.random() < 0.95) {
+        particles.push(spawnParticle());
+      }
+
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        // Gust turbulence.
+        p.vx += (Math.random() - 0.5) * 0.00015;
+        p.vy += (Math.random() - 0.5) * 0.00015;
+        // Gentle acceleration in wind direction.
+        p.vx += Math.cos(windAngle) * 0.000015;
+        p.vy += Math.sin(windAngle) * 0.000015;
+
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life -= p.decay;
+
+        if (p.life <= 0 || p.x > 1.15 || p.y > 1.15) {
+          particles.splice(i, 1);
+        }
+      }
+    }
+
+    function clamp(v, min, max) {
+      return Math.max(min, Math.min(max, v));
+    }
+
+    function renderParticles() {
+      if (particles.length === 0) return;
+
+      gl.useProgram(progParticle);
+      gl.enableVertexAttribArray(locParticle.a_pos);
+      gl.enableVertexAttribArray(locParticle.a_size);
+      gl.enableVertexAttribArray(locParticle.a_alpha);
+
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        pPosArr[i * 2] = p.x;
+        pPosArr[i * 2 + 1] = p.y;
+        pSizeArr[i] = p.size * (0.4 + 0.6 * p.life);
+        pAlphaArr[i] = p.life * 0.55;
+      }
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, pPosBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, pPosArr.subarray(0, particles.length * 2), gl.DYNAMIC_DRAW);
+      gl.vertexAttribPointer(locParticle.a_pos, 2, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, pSizeBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, pSizeArr.subarray(0, particles.length), gl.DYNAMIC_DRAW);
+      gl.vertexAttribPointer(locParticle.a_size, 1, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, pAlphaBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, pAlphaArr.subarray(0, particles.length), gl.DYNAMIC_DRAW);
+      gl.vertexAttribPointer(locParticle.a_alpha, 1, gl.FLOAT, false, 0, 0);
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      gl.blendEquation(gl.FUNC_ADD);
+      gl.drawArrays(gl.POINTS, 0, particles.length);
+      gl.disable(gl.BLEND);
+
+      gl.disableVertexAttribArray(locParticle.a_pos);
+      gl.disableVertexAttribArray(locParticle.a_size);
+      gl.disableVertexAttribArray(locParticle.a_alpha);
+    }
 
     // ------------------------------------------------------------------
     // Resize / loop
@@ -673,12 +837,15 @@
       updateWave();
       runSimPass(time * 0.001);
       renderPass(time * 0.001);
+      updateParticles();
+      renderParticles();
       requestAnimationFrame(loop);
     }
 
     window.addEventListener('resize', resize);
 
     resize();
+    seedParticles();
 
     // Optional demo stroke for screenshots / testing.
     if (location.search.includes('demo')) {
