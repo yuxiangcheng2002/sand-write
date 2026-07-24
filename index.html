@@ -131,7 +131,6 @@
 
     uniform sampler2D u_height;
     uniform vec2 u_texel;
-    uniform float u_time;
 
     float sampleH(vec2 uv) {
       return texture(u_height, uv).r;
@@ -156,10 +155,6 @@
       // Gentle isotropic diffusion so strokes round off.
       float avg = (hL + hR + hD + hU) * 0.25;
       h = mix(h, avg, 0.025);
-
-      // Tiny noise disturbance prevents perfectly static artifacts.
-      float jitter = (sin(v_uv.x * 432.1 + v_uv.y * 187.3 + u_time * 0.5) * 0.5 + 0.5) * 0.0002;
-      h += jitter;
 
       // Very slow damping so mounds persist but don't drift.
       h *= 0.9995;
@@ -383,8 +378,7 @@
     const locSim = {
       a_position: gl.getAttribLocation(progSim, 'a_position'),
       u_height: gl.getUniformLocation(progSim, 'u_height'),
-      u_texel: gl.getUniformLocation(progSim, 'u_texel'),
-      u_time: gl.getUniformLocation(progSim, 'u_time')
+      u_texel: gl.getUniformLocation(progSim, 'u_texel')
     };
     const locBrush = {
       a_position: gl.getAttribLocation(progBrush, 'a_position'),
@@ -531,7 +525,6 @@
       gl.bindTexture(gl.TEXTURE_2D, curTex);
       gl.uniform1i(locSim.u_height, 0);
       gl.uniform2f(locSim.u_texel, 1.0 / simW, 1.0 / simH);
-      gl.uniform1f(locSim.u_time, time);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       swap();
     }
