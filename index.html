@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Sand Write</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #c9b99a;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    #canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+    }
+    .controls {
+      position: fixed;
+      bottom: env(safe-area-inset-bottom, 0);
+      left: 0;
+      right: 0;
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      padding: 16px;
+      pointer-events: none;
+      z-index: 10;
+    }
+    button {
+      pointer-events: auto;
+      border: none;
+      border-radius: 999px;
+      padding: 12px 22px;
+      font-size: 15px;
+      font-weight: 600;
+      color: #5c4d3c;
+      background: rgba(255, 255, 255, 0.72);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      transition: transform 0.1s, background 0.2s;
+    }
+    button:active {
+      transform: scale(0.95);
+      background: rgba(255, 255, 255, 0.9);
+    }
+    .hint {
+      position: fixed;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(92, 77, 60, 0.7);
+      font-size: 13px;
+      letter-spacing: 0.02em;
+      pointer-events: none;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div class="hint">Draw with your finger · Wave clears</div>
+  <canvas id="canvas"></canvas>
+  <div class="controls">
+    <button id="waveBtn">Wave</button>
+    <button id="resetBtn">Clear</button>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d', { alpha: false });
+
+    // Offscreen buffer holds persistent sand drawing.
+    const buffer = document.createElement('canvas');
+    const bctx = buffer.getContext('2d', { alpha: false });
+
+    let width, height, dpr;
+    let particles = [];
+    let isDrawing = false;
+    let lastPos = null;
+
+    const SAND_COLORS = [
+      '#e3d2b0', '#decba6', '#dbc59e', '#e6d6b6',
+      '#d9c198', '#cfba90', '#e2cfa8', '#f0e2c4'
+    ];
+    const BASE_COLOR = '#c9b99a';
+
+    function resize() {
+      dpr = Math.min(window.devicePixelRatio || 1, 3);
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      buffer.width = canvas.width;
+      buffer.height = canvas.height;
+      canvas.style.width = width + 'px';
+      canvas.style.height = height + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.scale(1, 1);
+      bctx.scale(1, 1);
+      fillBase();
+    }
+
+    function fillBase() {
+      bctx.fillStyle = BASE_COLOR;
+      bctx.fillRect(0, 0, width, height);
+      addGrain(bctx, 0, 0, width, height, 0.08);
+    }
+
+    function addGrain(context, x, y, w, h, alpha) {
+      const imageData = context.getImageData(x * dpr, y * dpr, w * dpr, h * dpr);
+      const data = imageData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        const noise = (Math.random() - 0.5) * 18 * alpha;
+        data[i] = Math.max(0, Math.min(255, data[i] + noise));
+        data[i+1] = Math.max(0, Math.min(255, data[i+1] + noise));
+        data[i+2] = Math.max(0, Math.min(255, data[i+2] + noise));
+      }
+      context.putImageData(imageData, x * dpr, y * dpr);
+    }
+
+    function randColor() {
+      return SAND_COLORS[Math.floor(Math.random() * SAND_COLORS.length)];
+    }
+
+    function spawnSandLine(x1, y1, x2, y2) {
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 1) return;
+      const steps = Math.max(1, Math.floor(dist * 2.5));
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const cx = x1 + dx * t;
+        const cy = y1 + dy * t;
+        const count = 4 + Math.floor(Math.random() * 5);
+        for (let j = 0; j < count; j++) {
+          const angle = Math.random() * Math.PI * 2;
+          const r = Math.random() * 6;
+          particles.push({
+            x: cx + Math.cos(angle) * r,
+            y: cy + Math.sin(angle) * r,
+            vx: (Math.random() - 0.5) * 0.6,
+            vy: (Math.random() - 0.5) * 0.6,
+            life: 1,
+            size: 0.8 + Math.random() * 1.4,
+            color: randColor()
+          });
+        }
+      }
+    }
+
+    function settleParticle(p) {
+      // Stamp the particle into the persistent buffer.
+      bctx.fillStyle = p.color;
+      bctx.beginPath();
+      bctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      bctx.fill();
+    }
+
+    function updateParticles() {
+      // Batch settle alive particles; keep fresh ones animating.
+      const stillAlive = [];
+      for (const p of particles) {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= 0.92;
+        p.vy *= 0.92;
+        p.life -= 0.18;
+        if (p.life <= 0.4) {
+          settleParticle(p);
+        } else {
+          stillAlive.push(p);
+        }
+      }
+      particles = stillAlive;
+    }
+
+    function drawParticles() {
+      for (const p of particles) {
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function getPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      const source = e.touches ? e.touches[0] : e;
+      return {
+        x: source.clientX - rect.left,
+        y: source.clientY - rect.top
+      };
+    }
+
+    function onStart(e) {
+      e.preventDefault();
+      isDrawing = true;
+      lastPos = getPos(e);
+    }
+
+    function onMove(e) {
+      if (!isDrawing) return;
+      e.preventDefault();
+      const pos = getPos(e);
+      spawnSandLine(lastPos.x, lastPos.y, pos.x, pos.y);
+      lastPos = pos;
+    }
+
+    function onEnd(e) {
+      isDrawing = false;
+      lastPos = null;
+      // Settle any stragglers quickly.
+      for (const p of particles) settleParticle(p);
+      particles = [];
+    }
+
+    // Wave clear: a foamy band sweeps up the screen and erases sand.
+    let waveY = null;
+    let waveActive = false;
+
+    function startWave() {
+      if (waveActive) return;
+      waveActive = true;
+      waveY = height + 40;
+    }
+
+    function updateWave() {
+      if (!waveActive) return;
+      waveY -= height * 0.012;
+      if (waveY < -80) {
+        waveActive = false;
+        waveY = null;
+        return;
+      }
+
+      // Softly erase under the wave band.
+      const band = 60;
+      const gy = Math.max(0, waveY - band);
+      const gh = Math.min(height - gy, band * 2);
+      if (gh > 0) {
+        bctx.fillStyle = BASE_COLOR;
+        bctx.fillRect(0, gy, width, gh);
+        addGrain(bctx, 0, gy, width, gh, 0.08);
+      }
+    }
+
+    function drawWave() {
+      if (!waveActive) return;
+      const grad = ctx.createLinearGradient(0, waveY - 40, 0, waveY + 40);
+      grad.addColorStop(0, 'rgba(255,255,255,0)');
+      grad.addColorStop(0.5, 'rgba(255,255,255,0.55)');
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, waveY - 40, width, 80);
+    }
+
+    function loop() {
+      updateParticles();
+      updateWave();
+
+      // Render buffer, then live particles and wave overlay.
+      ctx.drawImage(buffer, 0, 0, width, height);
+      drawParticles();
+      drawWave();
+
+      requestAnimationFrame(loop);
+    }
+
+    canvas.addEventListener('mousedown', onStart);
+    canvas.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onEnd);
+    canvas.addEventListener('touchstart', onStart, { passive: false });
+    canvas.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onEnd);
+    window.addEventListener('touchcancel', onEnd);
+
+    document.getElementById('waveBtn').addEventListener('click', startWave);
+    document.getElementById('resetBtn').addEventListener('click', () => {
+      fillBase();
+    });
+
+    window.addEventListener('resize', () => {
+      // Resize clears the canvas; preserve by drawing old buffer scaled.
+      const oldBuffer = document.createElement('canvas');
+      oldBuffer.width = buffer.width;
+      oldBuffer.height = buffer.height;
+      const octx = oldBuffer.getContext('2d');
+      octx.drawImage(buffer, 0, 0);
+      resize();
+      bctx.drawImage(oldBuffer, 0, 0, oldBuffer.width, oldBuffer.height, 0, 0, width * dpr, height * dpr);
+    });
+
+    resize();
+    loop();
+  </script>
+</body>
+</html>
