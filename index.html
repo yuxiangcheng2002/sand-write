@@ -57,21 +57,29 @@
       transform: scale(0.95);
       background: rgba(255, 255, 255, 0.9);
     }
-    .hint {
+    .hint, #fallback {
       position: fixed;
       top: 12px;
       left: 50%;
       transform: translateX(-50%);
-      color: rgba(92, 77, 60, 0.7);
+      color: rgba(92, 77, 60, 0.85);
       font-size: 13px;
       letter-spacing: 0.02em;
       pointer-events: none;
       z-index: 10;
+      text-align: center;
+    }
+    #fallback {
+      display: none;
+      background: rgba(255,255,255,0.7);
+      padding: 8px 14px;
+      border-radius: 999px;
     }
   </style>
 </head>
 <body>
   <div class="hint">Draw with your finger · Wave clears</div>
+  <div id="fallback">WebGL 2 is not available on this device.</div>
   <canvas id="canvas"></canvas>
   <div class="controls">
     <button id="waveBtn">Wave</button>
@@ -80,205 +88,480 @@
 
   <script>
     const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d', { alpha: false });
+    const fallback = document.getElementById('fallback');
 
-    // Offscreen buffer holds persistent sand drawing.
-    const buffer = document.createElement('canvas');
-    const bctx = buffer.getContext('2d', { alpha: false });
+    const gl = canvas.getContext('webgl2', {
+      alpha: false,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      preserveDrawingBuffer: false
+    });
 
-    let width, height, dpr;
-    let particles = [];
-    let isDrawing = false;
-    let lastPos = null;
-
-    const SAND_COLORS = [
-      '#e3d2b0', '#decba6', '#dbc59e', '#e6d6b6',
-      '#d9c198', '#cfba90', '#e2cfa8', '#f0e2c4'
-    ];
-    const BASE_COLOR = '#c9b99a';
-
-    function resize() {
-      dpr = Math.min(window.devicePixelRatio || 1, 3);
-      width = window.innerWidth;
-      height = window.innerHeight;
-      canvas.width = Math.floor(width * dpr);
-      canvas.height = Math.floor(height * dpr);
-      buffer.width = canvas.width;
-      buffer.height = canvas.height;
-      canvas.style.width = width + 'px';
-      canvas.style.height = height + 'px';
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.scale(1, 1);
-      bctx.scale(1, 1);
-      fillBase();
+    if (!gl) {
+      fallback.style.display = 'block';
+      document.querySelector('.hint').style.display = 'none';
+      throw new Error('WebGL 2 not supported');
     }
 
-    function fillBase() {
-      bctx.fillStyle = BASE_COLOR;
-      bctx.fillRect(0, 0, width, height);
-      addGrain(bctx, 0, 0, width, height, 0.08);
+    window.addEventListener('error', (e) => {
+      fallback.textContent = 'JS error: ' + e.message;
+      fallback.style.display = 'block';
+      console.error(e);
+    });
+
+    // ------------------------------------------------------------------
+    // Shaders
+    // ------------------------------------------------------------------
+
+    const VS_QUAD = `#version 300 es
+    in vec2 a_position;
+    out vec2 v_uv;
+    void main() {
+      v_uv = a_position * 0.5 + 0.5;
+      gl_Position = vec4(a_position, 0.0, 1.0);
+    }`;
+
+    const FS_SIM = `#version 300 es
+    precision highp float;
+    precision highp sampler2D;
+
+    in vec2 v_uv;
+    out vec4 fragColor;
+
+    uniform sampler2D u_height;
+    uniform vec2 u_texel;
+    uniform float u_time;
+
+    float sampleH(vec2 uv) {
+      return texture(u_height, uv).r;
     }
 
-    function addGrain(context, x, y, w, h, alpha) {
-      const imageData = context.getImageData(x * dpr, y * dpr, w * dpr, h * dpr);
-      const data = imageData.data;
-      for (let i = 0; i < data.length; i += 4) {
-        const noise = (Math.random() - 0.5) * 18 * alpha;
-        data[i] = Math.max(0, Math.min(255, data[i] + noise));
-        data[i+1] = Math.max(0, Math.min(255, data[i+1] + noise));
-        data[i+2] = Math.max(0, Math.min(255, data[i+2] + noise));
+    void main() {
+      float h = sampleH(v_uv);
+      float hL = sampleH(v_uv + vec2(-u_texel.x, 0.0));
+      float hR = sampleH(v_uv + vec2( u_texel.x, 0.0));
+      float hD = sampleH(v_uv + vec2(0.0, -u_texel.y));
+      float hU = sampleH(v_uv + vec2(0.0,  u_texel.y));
+
+      // Avalanche / angle of repose relaxation.
+      float threshold = 0.018;
+      float flow = 0.0;
+      flow += max(h - hL - threshold, 0.0);
+      flow += max(h - hR - threshold, 0.0);
+      flow += max(h - hD - threshold, 0.0);
+      flow += max(h - hU - threshold, 0.0);
+      h -= flow * 0.28;
+
+      // Gentle isotropic diffusion so strokes round off.
+      float avg = (hL + hR + hD + hU) * 0.25;
+      h = mix(h, avg, 0.025);
+
+      // Tiny noise disturbance prevents perfectly static artifacts.
+      float jitter = (sin(v_uv.x * 432.1 + v_uv.y * 187.3 + u_time * 0.5) * 0.5 + 0.5) * 0.0002;
+      h += jitter;
+
+      // Very slow damping so mounds persist but don't drift.
+      h *= 0.9995;
+
+      fragColor = vec4(max(h, 0.0), 0.0, 0.0, 1.0);
+    }`;
+
+    const VS_BRUSH = `#version 300 es
+    in vec2 a_position;
+    uniform vec2 u_center;
+    uniform vec2 u_radius;
+    out vec2 v_local;
+    void main() {
+      v_local = a_position;
+      vec2 uv = u_center + a_position * u_radius;
+      gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+    }`;
+
+    const FS_BRUSH = `#version 300 es
+    precision highp float;
+    in vec2 v_local;
+    uniform float u_strength;
+    out vec4 fragColor;
+    void main() {
+      float d = length(v_local);
+      if (d > 1.0) discard;
+      float falloff = smoothstep(1.0, 0.0, d);
+      fragColor = vec4(u_strength * falloff, 0.0, 0.0, 1.0);
+    }`;
+
+    const FS_WAVE = `#version 300 es
+    precision highp float;
+    precision highp sampler2D;
+
+    in vec2 v_uv;
+    out vec4 fragColor;
+
+    uniform sampler2D u_height;
+    uniform float u_waveY;
+
+    void main() {
+      float h = texture(u_height, v_uv).r;
+      // u_waveY is in UV space; erase everything below it with a foam edge.
+      float erase = smoothstep(u_waveY, u_waveY - 0.10, v_uv.y);
+      h = mix(h, 0.0, erase * 0.18);
+      fragColor = vec4(h, 0.0, 0.0, 1.0);
+    }`;
+
+    const FS_RENDER = `#version 300 es
+    precision highp float;
+    precision highp sampler2D;
+
+    in vec2 v_uv;
+    out vec4 fragColor;
+
+    uniform sampler2D u_height;
+    uniform vec2 u_texel;
+    uniform vec3 u_lightDir;
+    uniform float u_time;
+
+    // Hash / value noise for grain.
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    float noise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      float a = hash(i);
+      float b = hash(i + vec2(1.0, 0.0));
+      float c = hash(i + vec2(0.0, 1.0));
+      float d = hash(i + vec2(1.0, 1.0));
+      return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+    float fbm(vec2 p) {
+      float v = 0.0;
+      float a = 0.5;
+      for (int i = 0; i < 4; i++) {
+        v += a * noise(p);
+        p *= 2.0;
+        a *= 0.5;
       }
-      context.putImageData(imageData, x * dpr, y * dpr);
+      return v;
     }
 
-    function randColor() {
-      return SAND_COLORS[Math.floor(Math.random() * SAND_COLORS.length)];
+    void main() {
+      float h  = texture(u_height, v_uv).r;
+      float hL = texture(u_height, v_uv + vec2(-u_texel.x, 0.0)).r;
+      float hR = texture(u_height, v_uv + vec2( u_texel.x, 0.0)).r;
+      float hD = texture(u_height, v_uv + vec2(0.0, -u_texel.y)).r;
+      float hU = texture(u_height, v_uv + vec2(0.0,  u_texel.y)).r;
+
+      // Normal from height gradient; exaggerate Z for readable dunes.
+      vec3 normal = normalize(vec3(hL - hR, hD - hU, u_texel.x * 3.5));
+
+      // Sand palette.
+      vec3 bed   = vec3(0.788, 0.725, 0.604);
+      vec3 fresh = vec3(0.918, 0.851, 0.722);
+      vec3 wet   = vec3(0.651, 0.592, 0.475);
+
+      // Patchy low-frequency variation across the bed.
+      float bedPatch = fbm(v_uv * 18.0 + vec2(u_time * 0.005));
+      bed = mix(bed * 0.95, bed * 1.05, bedPatch);
+
+      // Grain detail.
+      vec2 grainUV = v_uv * 1600.0;
+      float grain = fbm(grainUV);
+      float micro = noise(grainUV * 3.5);
+
+      // Mix colors by height.
+      vec3 color = mix(bed, fresh, smoothstep(0.0, 0.12, h));
+      color = mix(color, wet, smoothstep(0.30, 0.80, h) * 0.35);
+      color *= 0.88 + 0.24 * grain + 0.08 * micro;
+
+      // Directional light.
+      vec3 L = normalize(u_lightDir);
+      vec3 V = vec3(0.0, 0.0, 1.0);
+      vec3 H = normalize(L + V);
+      float diff = max(dot(normal, L), 0.0);
+      float spec = pow(max(dot(normal, H), 0.0), 40.0);
+
+      // Self-shadow / ambient occlusion in valleys.
+      float localAvg = (hL + hR + hD + hU) * 0.25;
+      float ao = 1.0 - 0.45 * smoothstep(0.0, 0.08, h - localAvg);
+
+      color = color * (0.50 + 0.55 * diff) + vec3(spec * 0.10);
+      color *= ao;
+
+      // Subtle vignette.
+      vec2 c = v_uv - 0.5;
+      color *= 1.0 - 0.12 * dot(c, c);
+
+      fragColor = vec4(color, 1.0);
+    }`;
+
+    function createShader(gl, type, source) {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, source);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        const log = gl.getShaderInfoLog(s);
+        const snippet = source.split('\n').map((l, i) => (i + 1) + ': ' + l).slice(0, 20).join('\n');
+        throw new Error('Shader compile failed:\n' + log + '\n---\n' + snippet);
+      }
+      return s;
     }
 
-    function spawnSandLine(x1, y1, x2, y2) {
-      const dx = x2 - x1;
-      const dy = y2 - y1;
+    function createProgram(gl, vsSource, fsSource) {
+      const vs = createShader(gl, gl.VERTEX_SHADER, vsSource);
+      const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+      const p = gl.createProgram();
+      gl.attachShader(p, vs);
+      gl.attachShader(p, fs);
+      gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(p));
+        throw new Error('Program link failed');
+      }
+      return p;
+    }
+
+    const progSim = createProgram(gl, VS_QUAD, FS_SIM);
+    const progBrush = createProgram(gl, VS_BRUSH, FS_BRUSH);
+    const progWave = createProgram(gl, VS_QUAD, FS_WAVE);
+    const progRender = createProgram(gl, VS_QUAD, FS_RENDER);
+
+    const locSim = {
+      a_position: gl.getAttribLocation(progSim, 'a_position'),
+      u_height: gl.getUniformLocation(progSim, 'u_height'),
+      u_texel: gl.getUniformLocation(progSim, 'u_texel'),
+      u_time: gl.getUniformLocation(progSim, 'u_time')
+    };
+    const locBrush = {
+      a_position: gl.getAttribLocation(progBrush, 'a_position'),
+      u_center: gl.getUniformLocation(progBrush, 'u_center'),
+      u_radius: gl.getUniformLocation(progBrush, 'u_radius'),
+      u_strength: gl.getUniformLocation(progBrush, 'u_strength')
+    };
+    const locWave = {
+      a_position: gl.getAttribLocation(progWave, 'a_position'),
+      u_height: gl.getUniformLocation(progWave, 'u_height'),
+      u_waveY: gl.getUniformLocation(progWave, 'u_waveY')
+    };
+    const locRender = {
+      a_position: gl.getAttribLocation(progRender, 'a_position'),
+      u_height: gl.getUniformLocation(progRender, 'u_height'),
+      u_texel: gl.getUniformLocation(progRender, 'u_texel'),
+      u_lightDir: gl.getUniformLocation(progRender, 'u_lightDir'),
+      u_time: gl.getUniformLocation(progRender, 'u_time')
+    };
+
+    // ------------------------------------------------------------------
+    // Geometry
+    // ------------------------------------------------------------------
+
+    const quadBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1, -1,  1, -1,  -1,  1,
+      -1,  1,  1, -1,   1,  1
+    ]), gl.STATIC_DRAW);
+
+    function bindQuad(loc) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Heightfield textures
+    // ------------------------------------------------------------------
+
+    // Use a reduced-resolution heightfield for performance; render shader
+    // samples it at full screen resolution, so edges stay sharp.
+    const SIM_SCALE = 0.5;
+    let simW, simH;
+    let texA, texB, fboA, fboB;
+    let curTex, nextTex, curFbo, nextFbo;
+
+    let heightFormat = 'rgba32f'; // 'rgba32f' | 'rgba16f' | 'rgba8'
+
+    function createHeightTexture(w, h) {
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+
+      // Prefer floating-point heightfield for quality; fall back to 8-bit.
+      let internalFormat, format, type;
+      if (gl.getExtension('EXT_color_buffer_float')) {
+        internalFormat = gl.RGBA32F;
+        format = gl.RGBA;
+        type = gl.FLOAT;
+        heightFormat = 'rgba32f';
+      } else if (gl.getExtension('EXT_color_buffer_half_float')) {
+        internalFormat = gl.RGBA16F;
+        format = gl.RGBA;
+        type = gl.HALF_FLOAT;
+        heightFormat = 'rgba16f';
+      } else {
+        internalFormat = gl.RGBA8;
+        format = gl.RGBA;
+        type = gl.UNSIGNED_BYTE;
+        heightFormat = 'rgba8';
+      }
+
+      gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, type, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return tex;
+    }
+
+    function createFBO(tex) {
+      const fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+      if (status !== gl.FRAMEBUFFER_COMPLETE) {
+        throw new Error('FBO incomplete: ' + status.toString(16));
+      }
+      return fbo;
+    }
+
+    function initHeightfield() {
+      simW = Math.max(1, Math.floor(canvas.width * SIM_SCALE));
+      simH = Math.max(1, Math.floor(canvas.height * SIM_SCALE));
+
+      if (texA) {
+        gl.deleteTexture(texA);
+        gl.deleteTexture(texB);
+        gl.deleteFramebuffer(fboA);
+        gl.deleteFramebuffer(fboB);
+      }
+
+      texA = createHeightTexture(simW, simH);
+      texB = createHeightTexture(simW, simH);
+      fboA = createFBO(texA);
+      fboB = createFBO(texB);
+      curTex = texA; nextTex = texB;
+      curFbo = fboA; nextFbo = fboB;
+
+      clearHeightfield();
+    }
+
+    function clearHeightfield() {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, curFbo);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+
+    // ------------------------------------------------------------------
+    // Full-screen passes
+    // ------------------------------------------------------------------
+
+    function bindPass(program, locs) {
+      gl.useProgram(program);
+      bindQuad(locs.a_position);
+    }
+
+    function runSimPass(time) {
+      bindPass(progSim, locSim);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, nextFbo);
+      gl.viewport(0, 0, simW, simH);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, curTex);
+      gl.uniform1i(locSim.u_height, 0);
+      gl.uniform2f(locSim.u_texel, 1.0 / simW, 1.0 / simH);
+      gl.uniform1f(locSim.u_time, time);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      swap();
+    }
+
+    function runWavePass(waveY) {
+      bindPass(progWave, locWave);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, curFbo);
+      gl.viewport(0, 0, simW, simH);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, curTex);
+      gl.uniform1i(locWave.u_height, 0);
+      gl.uniform1f(locWave.u_waveY, waveY);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+
+    function renderPass(time) {
+      bindPass(progRender, locRender);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, curTex);
+      gl.uniform1i(locRender.u_height, 0);
+      gl.uniform2f(locRender.u_texel, 1.0 / simW, 1.0 / simH);
+      gl.uniform3f(locRender.u_lightDir, 0.25, -0.35, 0.9);
+      gl.uniform1f(locRender.u_time, time);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+
+    function swap() {
+      const t = curTex; curTex = nextTex; nextTex = t;
+      const f = curFbo; curFbo = nextFbo; nextFbo = f;
+    }
+
+    // ------------------------------------------------------------------
+    // Brush interaction
+    // ------------------------------------------------------------------
+
+    let isDrawing = false;
+    let lastUV = null;
+    const BRUSH_STRENGTH = 0.18;
+    const BRUSH_RADIUS_UV = 0.018;
+
+    function getUV(e) {
+      const rect = canvas.getBoundingClientRect();
+      const src = e.touches ? e.touches[0] : e;
+      return {
+        x: (src.clientX - rect.left) / rect.width,
+        y: 1.0 - (src.clientY - rect.top) / rect.height
+      };
+    }
+
+    function stampBrush(uv, strength) {
+      bindPass(progBrush, locBrush);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, curFbo);
+      gl.viewport(0, 0, simW, simH);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE);
+      gl.blendEquation(gl.FUNC_ADD);
+      gl.uniform2f(locBrush.u_center, uv.x, uv.y);
+      gl.uniform2f(locBrush.u_radius, BRUSH_RADIUS_UV, BRUSH_RADIUS_UV * (simW / simH));
+      gl.uniform1f(locBrush.u_strength, strength);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.disable(gl.BLEND);
+    }
+
+    function strokeBetween(u1, u2) {
+      const dx = u2.x - u1.x;
+      const dy = u2.y - u1.y;
       const dist = Math.hypot(dx, dy);
-      if (dist < 1) return;
-      const steps = Math.max(1, Math.floor(dist * 2.5));
+      const steps = Math.max(1, Math.floor(dist / 0.005));
       for (let i = 0; i <= steps; i++) {
         const t = i / steps;
-        const cx = x1 + dx * t;
-        const cy = y1 + dy * t;
-        const count = 4 + Math.floor(Math.random() * 5);
-        for (let j = 0; j < count; j++) {
-          const angle = Math.random() * Math.PI * 2;
-          const r = Math.random() * 6;
-          particles.push({
-            x: cx + Math.cos(angle) * r,
-            y: cy + Math.sin(angle) * r,
-            vx: (Math.random() - 0.5) * 0.6,
-            vy: (Math.random() - 0.5) * 0.6,
-            life: 1,
-            size: 0.8 + Math.random() * 1.4,
-            color: randColor()
-          });
-        }
+        stampBrush({ x: u1.x + dx * t, y: u1.y + dy * t }, BRUSH_STRENGTH);
       }
-    }
-
-    function settleParticle(p) {
-      // Stamp the particle into the persistent buffer.
-      bctx.fillStyle = p.color;
-      bctx.beginPath();
-      bctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-      bctx.fill();
-    }
-
-    function updateParticles() {
-      // Batch settle alive particles; keep fresh ones animating.
-      const stillAlive = [];
-      for (const p of particles) {
-        p.x += p.vx;
-        p.y += p.vy;
-        p.vx *= 0.92;
-        p.vy *= 0.92;
-        p.life -= 0.18;
-        if (p.life <= 0.4) {
-          settleParticle(p);
-        } else {
-          stillAlive.push(p);
-        }
-      }
-      particles = stillAlive;
-    }
-
-    function drawParticles() {
-      for (const p of particles) {
-        ctx.fillStyle = p.color;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-
-    function getPos(e) {
-      const rect = canvas.getBoundingClientRect();
-      const source = e.touches ? e.touches[0] : e;
-      return {
-        x: source.clientX - rect.left,
-        y: source.clientY - rect.top
-      };
     }
 
     function onStart(e) {
       e.preventDefault();
       isDrawing = true;
-      lastPos = getPos(e);
+      lastUV = getUV(e);
+      stampBrush(lastUV, BRUSH_STRENGTH);
     }
 
     function onMove(e) {
       if (!isDrawing) return;
       e.preventDefault();
-      const pos = getPos(e);
-      spawnSandLine(lastPos.x, lastPos.y, pos.x, pos.y);
-      lastPos = pos;
+      const uv = getUV(e);
+      strokeBetween(lastUV, uv);
+      lastUV = uv;
     }
 
     function onEnd(e) {
       isDrawing = false;
-      lastPos = null;
-      // Settle any stragglers quickly.
-      for (const p of particles) settleParticle(p);
-      particles = [];
-    }
-
-    // Wave clear: a foamy band sweeps up the screen and erases sand.
-    let waveY = null;
-    let waveActive = false;
-
-    function startWave() {
-      if (waveActive) return;
-      waveActive = true;
-      waveY = height + 40;
-    }
-
-    function updateWave() {
-      if (!waveActive) return;
-      waveY -= height * 0.012;
-      if (waveY < -80) {
-        waveActive = false;
-        waveY = null;
-        return;
-      }
-
-      // Softly erase under the wave band.
-      const band = 60;
-      const gy = Math.max(0, waveY - band);
-      const gh = Math.min(height - gy, band * 2);
-      if (gh > 0) {
-        bctx.fillStyle = BASE_COLOR;
-        bctx.fillRect(0, gy, width, gh);
-        addGrain(bctx, 0, gy, width, gh, 0.08);
-      }
-    }
-
-    function drawWave() {
-      if (!waveActive) return;
-      const grad = ctx.createLinearGradient(0, waveY - 40, 0, waveY + 40);
-      grad.addColorStop(0, 'rgba(255,255,255,0)');
-      grad.addColorStop(0.5, 'rgba(255,255,255,0.55)');
-      grad.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, waveY - 40, width, 80);
-    }
-
-    function loop() {
-      updateParticles();
-      updateWave();
-
-      // Render buffer, then live particles and wave overlay.
-      ctx.drawImage(buffer, 0, 0, width, height);
-      drawParticles();
-      drawWave();
-
-      requestAnimationFrame(loop);
+      lastUV = null;
     }
 
     canvas.addEventListener('mousedown', onStart);
@@ -289,24 +572,70 @@
     window.addEventListener('touchend', onEnd);
     window.addEventListener('touchcancel', onEnd);
 
-    document.getElementById('waveBtn').addEventListener('click', startWave);
-    document.getElementById('resetBtn').addEventListener('click', () => {
-      fillBase();
-    });
+    // ------------------------------------------------------------------
+    // Wave clear
+    // ------------------------------------------------------------------
 
-    window.addEventListener('resize', () => {
-      // Resize clears the canvas; preserve by drawing old buffer scaled.
-      const oldBuffer = document.createElement('canvas');
-      oldBuffer.width = buffer.width;
-      oldBuffer.height = buffer.height;
-      const octx = oldBuffer.getContext('2d');
-      octx.drawImage(buffer, 0, 0);
-      resize();
-      bctx.drawImage(oldBuffer, 0, 0, oldBuffer.width, oldBuffer.height, 0, 0, width * dpr, height * dpr);
-    });
+    let waveY = -1;
+    let waveActive = false;
+
+    function startWave() {
+      if (waveActive) return;
+      waveActive = true;
+      waveY = 0.0;
+    }
+
+    function updateWave() {
+      if (!waveActive) return;
+      waveY += 0.006;
+      if (waveY > 1.15) {
+        waveActive = false;
+        waveY = -1;
+        return;
+      }
+      runWavePass(waveY);
+    }
+
+    document.getElementById('waveBtn').addEventListener('click', startWave);
+    document.getElementById('resetBtn').addEventListener('click', clearHeightfield);
+
+    // ------------------------------------------------------------------
+    // Resize / loop
+    // ------------------------------------------------------------------
+
+    function resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.floor(window.innerWidth * dpr);
+      canvas.height = Math.floor(window.innerHeight * dpr);
+      canvas.style.width = window.innerWidth + 'px';
+      canvas.style.height = window.innerHeight + 'px';
+      initHeightfield();
+    }
+
+    function loop(time) {
+      updateWave();
+      runSimPass(time * 0.001);
+      renderPass(time * 0.001);
+      requestAnimationFrame(loop);
+    }
+
+    window.addEventListener('resize', resize);
 
     resize();
-    loop();
+
+    // Optional demo stroke for screenshots / testing.
+    if (location.search.includes('demo')) {
+      let t = 0;
+      function demoDraw() {
+        t += 0.03;
+        const uv = { x: 0.3 + t * 0.4, y: 0.4 + Math.sin(t * 4.0) * 0.15 };
+        stampBrush(uv, BRUSH_STRENGTH);
+        if (t < 1.0) requestAnimationFrame(demoDraw);
+      }
+      demoDraw();
+    }
+
+    requestAnimationFrame(loop);
   </script>
 </body>
 </html>
