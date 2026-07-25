@@ -197,15 +197,21 @@
       float d = length(v_local);
       if (d > 1.0) discard;
 
-      // Finger-drag displacement: low compacted center, raised sandy banks on the sides.
-      float center = smoothstep(0.65, 0.0, d) * 0.40;
-      float ridge = smoothstep(0.25, 0.55, d) * smoothstep(1.0, 0.55, d) * 0.95;
-      float shape = center + ridge;
+      // Deep groove in the center, raised sandy banks, and scattered outer grains.
+      float center = smoothstep(0.80, 0.0, d) * 0.18;
+      float ridge = smoothstep(0.15, 0.50, d) * smoothstep(1.0, 0.48, d) * 0.92;
 
-      // Sandy, irregular edge detail.
-      float edgeMask = smoothstep(0.25, 0.95, d);
-      float grain = 0.75 + 0.5 * noise(v_local * 20.0 + vec2(4.3, 1.7)) * edgeMask;
-      grain += 0.12 * noise(v_local * 55.0) * edgeMask;
+      // Individual grains spilling beyond the stroke edge.
+      float grainNoise = noise(v_local * 42.0 + vec2(5.1, 2.3));
+      float grainMask = smoothstep(0.42, 1.0, d) * smoothstep(0.58, 0.75, grainNoise);
+      float grains = grainMask * 1.1;
+
+      float shape = center + ridge + grains;
+
+      // Break up the ridge into loose grains.
+      float edgeMask = smoothstep(0.15, 0.90, d);
+      float grain = 0.70 + 0.55 * noise(v_local * 22.0 + vec2(4.3, 1.7)) * edgeMask;
+      grain += 0.18 * noise(v_local * 65.0) * edgeMask;
 
       fragColor = vec4(u_strength * shape * grain, 0.0, 0.0, 1.0);
     }`;
@@ -342,9 +348,17 @@
       float grain = fbm(grainUV);
       float micro = noise(grainUV * 3.5);
 
-      // Mix colors by height.
-      vec3 color = mix(bed, fresh, smoothstep(0.0, 0.12, h));
-      color = mix(color, wet, smoothstep(0.30, 0.80, h) * 0.35);
+      // Mix colors by height and local relief.
+      float localAvg = (hL + hR + hD + hU) * 0.25;
+      float relief = h - localAvg;
+
+      vec3 color = bed;
+      // Groove / compacted center is darker and wetter.
+      color = mix(color, wet, smoothstep(-0.01, -0.07, relief));
+      // Raised loose grains on the stroke edge are lighter and fresher.
+      color = mix(color, fresh, smoothstep(0.0, 0.18, relief));
+      // Very high grain tips catch a little moisture/shadow.
+      color = mix(color, wet, smoothstep(0.30, 0.70, relief) * 0.25);
       color *= 0.88 + 0.24 * grain + 0.08 * micro;
 
       // Directional light.
@@ -355,8 +369,7 @@
       float spec = pow(max(dot(normal, H), 0.0), 40.0);
 
       // Self-shadow / ambient occlusion in valleys.
-      float localAvg = (hL + hR + hD + hU) * 0.25;
-      float ao = 1.0 - 0.45 * smoothstep(0.0, 0.08, h - localAvg);
+      float ao = 1.0 - 0.45 * smoothstep(0.0, 0.08, relief);
 
       color = color * (0.50 + 0.55 * diff) + vec3(spec * 0.10);
       color *= ao;
