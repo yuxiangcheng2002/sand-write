@@ -336,40 +336,28 @@
       color = color * (0.50 + 0.55 * diff) + vec3(spec * 0.10);
       color *= ao;
 
-      // Subtle vignette.
+      // ----------------------------------------------------------------
+      // Grainy gloomy filter
+      // ----------------------------------------------------------------
+      // Film grain.
+      float filmGrain = (hash(v_uv * 2048.0 + u_time * 120.0) - 0.5) * 0.055;
+      color += filmGrain;
+
+      // Desaturate and cool down for a gloomy overcast feel.
+      float luma = dot(color, vec3(0.299, 0.587, 0.114));
+      color = mix(color, vec3(luma), 0.18);
+      color = mix(color, vec3(0.72, 0.74, 0.78), 0.08);
+
+      // Crush shadows and lower overall brightness.
+      color = pow(color, vec3(1.18));
+      color *= 0.82;
+
+      // Strong vignette.
       vec2 c = v_uv - 0.5;
-      color *= 1.0 - 0.12 * dot(c, c);
+      float vignette = 1.0 - 0.38 * dot(c, c);
+      color *= vignette;
 
       fragColor = vec4(color, 1.0);
-    }`;
-
-    const VS_PARTICLE = `#version 300 es
-    in vec2 a_pos;
-    in vec2 a_vel;
-    in float a_size;
-    in float a_alpha;
-    in vec2 a_corner;
-    uniform vec2 u_resolution;
-    out float v_alpha;
-    void main() {
-      v_alpha = a_alpha;
-      float speed = length(a_vel);
-      vec2 dir = speed > 0.00001 ? normalize(a_vel) : vec2(1.0, 0.0);
-      vec2 perp = vec2(-dir.y, dir.x);
-      // Stretch the particle into a streak in the wind direction.
-      float streakLen = max(a_size, a_size + speed * 1500.0);
-      vec2 offset = dir * a_corner.x * streakLen + perp * a_corner.y * a_size;
-      vec2 uv = a_pos + offset / u_resolution;
-      gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
-    }`;
-
-    const FS_PARTICLE = `#version 300 es
-    precision highp float;
-    in float v_alpha;
-    out vec4 fragColor;
-    void main() {
-      // Sandy streak, not a glowing orb.
-      fragColor = vec4(0.91, 0.84, 0.71, v_alpha);
     }`;
 
     function createShader(gl, type, source) {
@@ -403,7 +391,6 @@
     const progWave = createProgram(gl, VS_QUAD, FS_WAVE);
     const progInit = createProgram(gl, VS_QUAD, FS_INIT);
     const progRender = createProgram(gl, VS_QUAD, FS_RENDER);
-    const progParticle = createProgram(gl, VS_PARTICLE, FS_PARTICLE);
 
     const locSim = {
       a_position: gl.getAttribLocation(progSim, 'a_position'),
@@ -431,14 +418,6 @@
       u_texel: gl.getUniformLocation(progRender, 'u_texel'),
       u_lightDir: gl.getUniformLocation(progRender, 'u_lightDir'),
       u_time: gl.getUniformLocation(progRender, 'u_time')
-    };
-    const locParticle = {
-      a_pos: gl.getAttribLocation(progParticle, 'a_pos'),
-      a_vel: gl.getAttribLocation(progParticle, 'a_vel'),
-      a_size: gl.getAttribLocation(progParticle, 'a_size'),
-      a_alpha: gl.getAttribLocation(progParticle, 'a_alpha'),
-      a_corner: gl.getAttribLocation(progParticle, 'a_corner'),
-      u_resolution: gl.getUniformLocation(progParticle, 'u_resolution')
     };
 
     // ------------------------------------------------------------------
@@ -692,184 +671,7 @@
     }
 
     document.getElementById('waveBtn').addEventListener('click', startWave);
-    document.getElementById('resetBtn').addEventListener('click', () => {
-      clearHeightfield();
-      seedParticles();
-    });
-
-    // ------------------------------------------------------------------
-    // Wind-blown sand streaks
-    // ------------------------------------------------------------------
-
-    const MAX_PARTICLES = 1200;
-    let particles = [];
-
-    // Per-vertex buffers: 6 vertices (two triangles) per particle.
-    const pPosArr = new Float32Array(MAX_PARTICLES * 6 * 2);
-    const pVelArr = new Float32Array(MAX_PARTICLES * 6 * 2);
-    const pSizeArr = new Float32Array(MAX_PARTICLES * 6);
-    const pAlphaArr = new Float32Array(MAX_PARTICLES * 6);
-    const pCornerArr = new Float32Array(MAX_PARTICLES * 6 * 2);
-
-    const pPosBuffer = gl.createBuffer();
-    const pVelBuffer = gl.createBuffer();
-    const pSizeBuffer = gl.createBuffer();
-    const pAlphaBuffer = gl.createBuffer();
-    const pCornerBuffer = gl.createBuffer();
-
-    // Build static corner pattern once: (-1,-1),(1,-1),(-1,1),(-1,1),(1,-1),(1,1)
-    for (let i = 0; i < MAX_PARTICLES; i++) {
-      const o = i * 12;
-      pCornerArr[o + 0] = -1; pCornerArr[o + 1] = -1;
-      pCornerArr[o + 2] =  1; pCornerArr[o + 3] = -1;
-      pCornerArr[o + 4] = -1; pCornerArr[o + 5] =  1;
-      pCornerArr[o + 6] = -1; pCornerArr[o + 7] =  1;
-      pCornerArr[o + 8] =  1; pCornerArr[o + 9] = -1;
-      pCornerArr[o + 10] = 1; pCornerArr[o + 11] =  1;
-    }
-
-    let windAngle = 0.22; // low angle, mostly horizontal with slight lift
-    let gust = 0.0;
-
-    function spawnParticle() {
-      // Most particles blow in from the windward (left) side; some scuff off the bed.
-      let x, y;
-      const r = Math.random();
-      if (r < 0.78) {
-        x = -0.06 - Math.random() * 0.1;
-        y = Math.random();
-      } else if (r < 0.92) {
-        x = Math.random();
-        y = -0.04;
-      } else {
-        x = Math.random();
-        y = Math.random() * 0.5;
-      }
-
-      // Depth: 0 = far/upper, 1 = close/lower. Close particles are bigger and faster.
-      const depth = Math.random();
-      const baseSpeed = 0.0018 + depth * 0.0045 + gust * 0.002;
-      const spread = (Math.random() - 0.5) * 0.18;
-      const angle = windAngle + spread + (Math.random() - 0.5) * 0.05;
-      const vx = Math.cos(angle) * baseSpeed;
-      const vy = Math.sin(angle) * baseSpeed + 0.0002 + depth * 0.0003;
-
-      return {
-        x, y,
-        vx, vy,
-        depth,
-        size: (0.7 + depth * 1.8) * Math.max(1.0, Math.min(window.devicePixelRatio || 1, 2)),
-        life: 1.0,
-        decay: 0.001 + Math.random() * 0.002
-      };
-    }
-
-    function seedParticles() {
-      particles = [];
-      const count = Math.floor(MAX_PARTICLES * 0.45);
-      for (let i = 0; i < count; i++) {
-        const p = spawnParticle();
-        p.x = Math.random() * 1.3 - 0.15;
-        p.y = Math.random() * 1.1 - 0.05;
-        p.life = Math.random();
-        particles.push(p);
-      }
-    }
-
-    function updateParticles() {
-      // Slow wind shear and occasional gusts.
-      windAngle += (Math.random() - 0.5) * 0.0008;
-      windAngle = clamp(windAngle, 0.08, 0.42);
-      gust += (Math.random() - 0.5) * 0.02;
-      gust = clamp(gust, -0.5, 0.8) * 0.98;
-
-      while (particles.length < MAX_PARTICLES && Math.random() < 0.92) {
-        particles.push(spawnParticle());
-      }
-
-      for (let i = particles.length - 1; i >= 0; i--) {
-        const p = particles[i];
-        // Turbulence varies with height: stronger higher up.
-        const turb = 0.00008 + p.y * 0.00012;
-        p.vx += (Math.random() - 0.5) * turb + Math.cos(windAngle) * 0.00002;
-        p.vy += (Math.random() - 0.5) * turb + Math.sin(windAngle) * 0.00002;
-
-        p.x += p.vx;
-        p.y += p.vy;
-        p.life -= p.decay;
-
-        if (p.life <= 0 || p.x > 1.25 || p.y > 1.15 || p.x < -0.25) {
-          particles.splice(i, 1);
-        }
-      }
-    }
-
-    function clamp(v, min, max) {
-      return Math.max(min, Math.min(max, v));
-    }
-
-    function renderParticles() {
-      if (particles.length === 0) return;
-
-      gl.useProgram(progParticle);
-      gl.enableVertexAttribArray(locParticle.a_pos);
-      gl.enableVertexAttribArray(locParticle.a_vel);
-      gl.enableVertexAttribArray(locParticle.a_size);
-      gl.enableVertexAttribArray(locParticle.a_alpha);
-      gl.enableVertexAttribArray(locParticle.a_corner);
-
-      const count = particles.length;
-      for (let i = 0; i < count; i++) {
-        const p = particles[i];
-        const lifeAlpha = p.life * (0.45 + 0.45 * p.depth);
-        const size = p.size * (0.5 + 0.5 * p.life);
-        const v0 = i * 12;
-        const s0 = i * 6;
-        for (let j = 0; j < 6; j++) {
-          pPosArr[v0 + j * 2] = p.x;
-          pPosArr[v0 + j * 2 + 1] = p.y;
-          pVelArr[v0 + j * 2] = p.vx;
-          pVelArr[v0 + j * 2 + 1] = p.vy;
-          pSizeArr[s0 + j] = size;
-          pAlphaArr[s0 + j] = lifeAlpha;
-        }
-      }
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, pPosBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, pPosArr.subarray(0, count * 12), gl.DYNAMIC_DRAW);
-      gl.vertexAttribPointer(locParticle.a_pos, 2, gl.FLOAT, false, 0, 0);
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, pVelBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, pVelArr.subarray(0, count * 12), gl.DYNAMIC_DRAW);
-      gl.vertexAttribPointer(locParticle.a_vel, 2, gl.FLOAT, false, 0, 0);
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, pSizeBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, pSizeArr.subarray(0, count * 6), gl.DYNAMIC_DRAW);
-      gl.vertexAttribPointer(locParticle.a_size, 1, gl.FLOAT, false, 0, 0);
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, pAlphaBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, pAlphaArr.subarray(0, count * 6), gl.DYNAMIC_DRAW);
-      gl.vertexAttribPointer(locParticle.a_alpha, 1, gl.FLOAT, false, 0, 0);
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, pCornerBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, pCornerArr.subarray(0, count * 12), gl.STATIC_DRAW);
-      gl.vertexAttribPointer(locParticle.a_corner, 2, gl.FLOAT, false, 0, 0);
-
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.viewport(0, 0, canvas.width, canvas.height);
-      gl.uniform2f(locParticle.u_resolution, canvas.width, canvas.height);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      gl.blendEquation(gl.FUNC_ADD);
-      gl.drawArrays(gl.TRIANGLES, 0, count * 6);
-      gl.disable(gl.BLEND);
-
-      gl.disableVertexAttribArray(locParticle.a_pos);
-      gl.disableVertexAttribArray(locParticle.a_vel);
-      gl.disableVertexAttribArray(locParticle.a_size);
-      gl.disableVertexAttribArray(locParticle.a_alpha);
-      gl.disableVertexAttribArray(locParticle.a_corner);
-    }
+    document.getElementById('resetBtn').addEventListener('click', clearHeightfield);
 
     // ------------------------------------------------------------------
     // Resize / loop
@@ -888,15 +690,12 @@
       updateWave();
       runSimPass(time * 0.001);
       renderPass(time * 0.001);
-      updateParticles();
-      renderParticles();
       requestAnimationFrame(loop);
     }
 
     window.addEventListener('resize', resize);
 
     resize();
-    seedParticles();
 
     // Optional demo stroke for screenshots / testing.
     if (location.search.includes('demo')) {
