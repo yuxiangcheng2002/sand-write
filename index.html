@@ -357,6 +357,18 @@
       color = pow(color, vec3(0.92));
       color *= 0.96;
 
+      // Atmospheric mist: patchy haze that softens contrast and blooms highlights.
+      float mist = fbm(v_uv * 3.5 + vec2(u_time * 0.008)) * 0.35 + 0.18;
+      vec3 mistColor = vec3(0.95, 0.84, 0.66);
+      color = mix(color, mistColor, mist * 0.32);
+
+      // Bloom bright areas.
+      vec3 bloom = smoothstep(vec3(0.62), vec3(1.0), color) * 0.22;
+      color += bloom;
+
+      // Lower contrast for that mist-filter softness.
+      color = mix(color, vec3(0.5), 0.07);
+
       // Soft vignette.
       vec2 c = v_uv - 0.5;
       float vignette = 1.0 - 0.22 * dot(c, c);
