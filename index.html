@@ -178,11 +178,36 @@
     in vec2 v_local;
     uniform float u_strength;
     out vec4 fragColor;
+
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    float noise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      float a = hash(i);
+      float b = hash(i + vec2(1.0, 0.0));
+      float c = hash(i + vec2(0.0, 1.0));
+      float d = hash(i + vec2(1.0, 1.0));
+      return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+
     void main() {
       float d = length(v_local);
       if (d > 1.0) discard;
-      float falloff = smoothstep(1.0, 0.0, d);
-      fragColor = vec4(u_strength * falloff, 0.0, 0.0, 1.0);
+
+      // Finger-drag displacement: low compacted center, raised sandy banks on the sides.
+      float center = smoothstep(0.65, 0.0, d) * 0.40;
+      float ridge = smoothstep(0.25, 0.55, d) * smoothstep(1.0, 0.55, d) * 0.95;
+      float shape = center + ridge;
+
+      // Sandy, irregular edge detail.
+      float edgeMask = smoothstep(0.25, 0.95, d);
+      float grain = 0.75 + 0.5 * noise(v_local * 20.0 + vec2(4.3, 1.7)) * edgeMask;
+      grain += 0.12 * noise(v_local * 55.0) * edgeMask;
+
+      fragColor = vec4(u_strength * shape * grain, 0.0, 0.0, 1.0);
     }`;
 
     const FS_WAVE = `#version 300 es
@@ -598,8 +623,8 @@
 
     let isDrawing = false;
     let lastUV = null;
-    const BRUSH_STRENGTH = 0.18;
-    const BRUSH_RADIUS_UV = 0.018;
+    const BRUSH_STRENGTH = 0.24;
+    const BRUSH_RADIUS_UV = 0.024;
 
     function getUV(e) {
       const rect = canvas.getBoundingClientRect();
@@ -628,7 +653,7 @@
       const dx = u2.x - u1.x;
       const dy = u2.y - u1.y;
       const dist = Math.hypot(dx, dy);
-      const steps = Math.max(1, Math.floor(dist / 0.005));
+      const steps = Math.max(1, Math.floor(dist / 0.002));
       for (let i = 0; i <= steps; i++) {
         const t = i / steps;
         stampBrush({ x: u1.x + dx * t, y: u1.y + dy * t }, BRUSH_STRENGTH);
