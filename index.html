@@ -313,7 +313,7 @@
       bed = mix(bed * 0.95, bed * 1.05, bedPatch);
 
       // Grain detail.
-      vec2 grainUV = v_uv * 1600.0;
+      vec2 grainUV = v_uv * 700.0;
       float grain = fbm(grainUV);
       float micro = noise(grainUV * 3.5);
 
