@@ -337,24 +337,29 @@
       color *= ao;
 
       // ----------------------------------------------------------------
-      // Grainy gloomy filter
+      // Warm grainy filter with glare
       // ----------------------------------------------------------------
       // Film grain.
-      float filmGrain = (hash(v_uv * 2048.0 + u_time * 120.0) - 0.5) * 0.055;
+      float filmGrain = (hash(v_uv * 2048.0 + u_time * 120.0) - 0.5) * 0.04;
       color += filmGrain;
 
-      // Desaturate slightly, then tint warm and gloomy.
+      // Warm glare from upper right.
+      vec2 glareUV = v_uv - vec2(0.82, 0.82);
+      float glare = exp(-dot(glareUV, glareUV) * 2.5) * 0.22;
+      color += vec3(0.98, 0.78, 0.48) * glare;
+
+      // Slight desaturation, strong warm tint.
       float luma = dot(color, vec3(0.299, 0.587, 0.114));
-      color = mix(color, vec3(luma), 0.12);
-      color = mix(color, vec3(0.58, 0.46, 0.32), 0.12);
+      color = mix(color, vec3(luma), 0.06);
+      color = mix(color, vec3(0.78, 0.58, 0.34), 0.16);
 
-      // Crush shadows and lower overall brightness.
-      color = pow(color, vec3(1.12));
-      color *= 0.78;
+      // Lift shadows and brighten.
+      color = pow(color, vec3(0.92));
+      color *= 0.96;
 
-      // Strong vignette.
+      // Soft vignette.
       vec2 c = v_uv - 0.5;
-      float vignette = 1.0 - 0.38 * dot(c, c);
+      float vignette = 1.0 - 0.22 * dot(c, c);
       color *= vignette;
 
       fragColor = vec4(color, 1.0);
