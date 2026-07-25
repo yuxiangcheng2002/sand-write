@@ -345,13 +345,22 @@
 
     const VS_PARTICLE = `#version 300 es
     in vec2 a_pos;
+    in vec2 a_vel;
     in float a_size;
     in float a_alpha;
+    in vec2 a_corner;
+    uniform vec2 u_resolution;
     out float v_alpha;
     void main() {
       v_alpha = a_alpha;
-      gl_Position = vec4(a_pos * 2.0 - 1.0, 0.0, 1.0);
-      gl_PointSize = a_size;
+      float speed = length(a_vel);
+      vec2 dir = speed > 0.00001 ? normalize(a_vel) : vec2(1.0, 0.0);
+      vec2 perp = vec2(-dir.y, dir.x);
+      // Stretch the particle into a streak in the wind direction.
+      float streakLen = max(a_size, a_size + speed * 1500.0);
+      vec2 offset = dir * a_corner.x * streakLen + perp * a_corner.y * a_size;
+      vec2 uv = a_pos + offset / u_resolution;
+      gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
     }`;
 
     const FS_PARTICLE = `#version 300 es
@@ -359,12 +368,8 @@
     in float v_alpha;
     out vec4 fragColor;
     void main() {
-      vec2 c = gl_PointCoord - 0.5;
-      float d = length(c);
-      if (d > 0.5) discard;
-      float alpha = smoothstep(0.5, 0.0, d) * v_alpha;
-      // Bright, warm sand grain that catches light.
-      fragColor = vec4(0.98, 0.93, 0.82, alpha);
+      // Sandy streak, not a glowing orb.
+      fragColor = vec4(0.91, 0.84, 0.71, v_alpha);
     }`;
 
     function createShader(gl, type, source) {
@@ -429,8 +434,11 @@
     };
     const locParticle = {
       a_pos: gl.getAttribLocation(progParticle, 'a_pos'),
+      a_vel: gl.getAttribLocation(progParticle, 'a_vel'),
       a_size: gl.getAttribLocation(progParticle, 'a_size'),
-      a_alpha: gl.getAttribLocation(progParticle, 'a_alpha')
+      a_alpha: gl.getAttribLocation(progParticle, 'a_alpha'),
+      a_corner: gl.getAttribLocation(progParticle, 'a_corner'),
+      u_resolution: gl.getUniformLocation(progParticle, 'u_resolution')
     };
 
     // ------------------------------------------------------------------
@@ -690,86 +698,107 @@
     });
 
     // ------------------------------------------------------------------
-    // Floating sand particles
+    // Wind-blown sand streaks
     // ------------------------------------------------------------------
 
-    const MAX_PARTICLES = 280;
+    const MAX_PARTICLES = 1200;
     let particles = [];
-    const pPosArr = new Float32Array(MAX_PARTICLES * 2);
-    const pSizeArr = new Float32Array(MAX_PARTICLES);
-    const pAlphaArr = new Float32Array(MAX_PARTICLES);
+
+    // Per-vertex buffers: 6 vertices (two triangles) per particle.
+    const pPosArr = new Float32Array(MAX_PARTICLES * 6 * 2);
+    const pVelArr = new Float32Array(MAX_PARTICLES * 6 * 2);
+    const pSizeArr = new Float32Array(MAX_PARTICLES * 6);
+    const pAlphaArr = new Float32Array(MAX_PARTICLES * 6);
+    const pCornerArr = new Float32Array(MAX_PARTICLES * 6 * 2);
 
     const pPosBuffer = gl.createBuffer();
+    const pVelBuffer = gl.createBuffer();
     const pSizeBuffer = gl.createBuffer();
     const pAlphaBuffer = gl.createBuffer();
+    const pCornerBuffer = gl.createBuffer();
 
-    let windAngle = 0.35; // blowing mostly right and slightly up
+    // Build static corner pattern once: (-1,-1),(1,-1),(-1,1),(-1,1),(1,-1),(1,1)
+    for (let i = 0; i < MAX_PARTICLES; i++) {
+      const o = i * 12;
+      pCornerArr[o + 0] = -1; pCornerArr[o + 1] = -1;
+      pCornerArr[o + 2] =  1; pCornerArr[o + 3] = -1;
+      pCornerArr[o + 4] = -1; pCornerArr[o + 5] =  1;
+      pCornerArr[o + 6] = -1; pCornerArr[o + 7] =  1;
+      pCornerArr[o + 8] =  1; pCornerArr[o + 9] = -1;
+      pCornerArr[o + 10] = 1; pCornerArr[o + 11] =  1;
+    }
+
+    let windAngle = 0.22; // low angle, mostly horizontal with slight lift
+    let gust = 0.0;
+
+    function spawnParticle() {
+      // Most particles blow in from the windward (left) side; some scuff off the bed.
+      let x, y;
+      const r = Math.random();
+      if (r < 0.78) {
+        x = -0.06 - Math.random() * 0.1;
+        y = Math.random();
+      } else if (r < 0.92) {
+        x = Math.random();
+        y = -0.04;
+      } else {
+        x = Math.random();
+        y = Math.random() * 0.5;
+      }
+
+      // Depth: 0 = far/upper, 1 = close/lower. Close particles are bigger and faster.
+      const depth = Math.random();
+      const baseSpeed = 0.0018 + depth * 0.0045 + gust * 0.002;
+      const spread = (Math.random() - 0.5) * 0.18;
+      const angle = windAngle + spread + (Math.random() - 0.5) * 0.05;
+      const vx = Math.cos(angle) * baseSpeed;
+      const vy = Math.sin(angle) * baseSpeed + 0.0002 + depth * 0.0003;
+
+      return {
+        x, y,
+        vx, vy,
+        depth,
+        size: (0.7 + depth * 1.8) * Math.max(1.0, Math.min(window.devicePixelRatio || 1, 2)),
+        life: 1.0,
+        decay: 0.001 + Math.random() * 0.002
+      };
+    }
 
     function seedParticles() {
       particles = [];
-      for (let i = 0; i < MAX_PARTICLES * 0.25; i++) {
+      const count = Math.floor(MAX_PARTICLES * 0.45);
+      for (let i = 0; i < count; i++) {
         const p = spawnParticle();
-        p.x = Math.random() * 1.2 - 0.1;
-        p.y = Math.random() * 1.2 - 0.1;
+        p.x = Math.random() * 1.3 - 0.15;
+        p.y = Math.random() * 1.1 - 0.05;
         p.life = Math.random();
         particles.push(p);
       }
     }
 
-    function spawnParticle() {
-      let x, y;
-      const edge = Math.random();
-      if (edge < 0.45) {
-        // blow in from the left edge
-        x = -0.04;
-        y = Math.random();
-      } else if (edge < 0.75) {
-        // blow up from the bottom edge
-        x = Math.random();
-        y = -0.04;
-      } else {
-        // occasional particle lifting off the surface
-        x = Math.random();
-        y = Math.random() * 0.7;
-      }
-
-      const speed = 0.0006 + Math.random() * 0.0012;
-      const spread = (Math.random() - 0.5) * 0.6;
-      const vx = Math.cos(windAngle + spread) * speed + 0.0012;
-      const vy = Math.sin(windAngle + spread) * speed + 0.0004;
-
-      return {
-        x, y,
-        vx, vy,
-        size: (6.0 + Math.random() * 10.0) * Math.max(1.0, Math.min(window.devicePixelRatio || 1, 2)),
-        life: 1.0,
-        decay: 0.0008 + Math.random() * 0.0015
-      };
-    }
-
     function updateParticles() {
-      // Slowly drift wind direction.
-      windAngle += (Math.random() - 0.5) * 0.002;
-      windAngle = clamp(windAngle, 0.1, 0.8);
+      // Slow wind shear and occasional gusts.
+      windAngle += (Math.random() - 0.5) * 0.0008;
+      windAngle = clamp(windAngle, 0.08, 0.42);
+      gust += (Math.random() - 0.5) * 0.02;
+      gust = clamp(gust, -0.5, 0.8) * 0.98;
 
-      if (particles.length < MAX_PARTICLES && Math.random() < 0.95) {
+      while (particles.length < MAX_PARTICLES && Math.random() < 0.92) {
         particles.push(spawnParticle());
       }
 
       for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
-        // Gust turbulence.
-        p.vx += (Math.random() - 0.5) * 0.00015;
-        p.vy += (Math.random() - 0.5) * 0.00015;
-        // Gentle acceleration in wind direction.
-        p.vx += Math.cos(windAngle) * 0.000015;
-        p.vy += Math.sin(windAngle) * 0.000015;
+        // Turbulence varies with height: stronger higher up.
+        const turb = 0.00008 + p.y * 0.00012;
+        p.vx += (Math.random() - 0.5) * turb + Math.cos(windAngle) * 0.00002;
+        p.vy += (Math.random() - 0.5) * turb + Math.sin(windAngle) * 0.00002;
 
         p.x += p.vx;
         p.y += p.vy;
         p.life -= p.decay;
 
-        if (p.life <= 0 || p.x > 1.15 || p.y > 1.15) {
+        if (p.life <= 0 || p.x > 1.25 || p.y > 1.15 || p.x < -0.25) {
           particles.splice(i, 1);
         }
       }
@@ -784,40 +813,62 @@
 
       gl.useProgram(progParticle);
       gl.enableVertexAttribArray(locParticle.a_pos);
+      gl.enableVertexAttribArray(locParticle.a_vel);
       gl.enableVertexAttribArray(locParticle.a_size);
       gl.enableVertexAttribArray(locParticle.a_alpha);
+      gl.enableVertexAttribArray(locParticle.a_corner);
 
-      for (let i = 0; i < particles.length; i++) {
+      const count = particles.length;
+      for (let i = 0; i < count; i++) {
         const p = particles[i];
-        pPosArr[i * 2] = p.x;
-        pPosArr[i * 2 + 1] = p.y;
-        pSizeArr[i] = p.size * (0.4 + 0.6 * p.life);
-        pAlphaArr[i] = p.life * 0.55;
+        const lifeAlpha = p.life * (0.45 + 0.45 * p.depth);
+        const size = p.size * (0.5 + 0.5 * p.life);
+        const v0 = i * 12;
+        const s0 = i * 6;
+        for (let j = 0; j < 6; j++) {
+          pPosArr[v0 + j * 2] = p.x;
+          pPosArr[v0 + j * 2 + 1] = p.y;
+          pVelArr[v0 + j * 2] = p.vx;
+          pVelArr[v0 + j * 2 + 1] = p.vy;
+          pSizeArr[s0 + j] = size;
+          pAlphaArr[s0 + j] = lifeAlpha;
+        }
       }
 
       gl.bindBuffer(gl.ARRAY_BUFFER, pPosBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, pPosArr.subarray(0, particles.length * 2), gl.DYNAMIC_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, pPosArr.subarray(0, count * 12), gl.DYNAMIC_DRAW);
       gl.vertexAttribPointer(locParticle.a_pos, 2, gl.FLOAT, false, 0, 0);
 
+      gl.bindBuffer(gl.ARRAY_BUFFER, pVelBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, pVelArr.subarray(0, count * 12), gl.DYNAMIC_DRAW);
+      gl.vertexAttribPointer(locParticle.a_vel, 2, gl.FLOAT, false, 0, 0);
+
       gl.bindBuffer(gl.ARRAY_BUFFER, pSizeBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, pSizeArr.subarray(0, particles.length), gl.DYNAMIC_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, pSizeArr.subarray(0, count * 6), gl.DYNAMIC_DRAW);
       gl.vertexAttribPointer(locParticle.a_size, 1, gl.FLOAT, false, 0, 0);
 
       gl.bindBuffer(gl.ARRAY_BUFFER, pAlphaBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, pAlphaArr.subarray(0, particles.length), gl.DYNAMIC_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, pAlphaArr.subarray(0, count * 6), gl.DYNAMIC_DRAW);
       gl.vertexAttribPointer(locParticle.a_alpha, 1, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, pCornerBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, pCornerArr.subarray(0, count * 12), gl.STATIC_DRAW);
+      gl.vertexAttribPointer(locParticle.a_corner, 2, gl.FLOAT, false, 0, 0);
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.uniform2f(locParticle.u_resolution, canvas.width, canvas.height);
       gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.blendEquation(gl.FUNC_ADD);
-      gl.drawArrays(gl.POINTS, 0, particles.length);
+      gl.drawArrays(gl.TRIANGLES, 0, count * 6);
       gl.disable(gl.BLEND);
 
       gl.disableVertexAttribArray(locParticle.a_pos);
+      gl.disableVertexAttribArray(locParticle.a_vel);
       gl.disableVertexAttribArray(locParticle.a_size);
       gl.disableVertexAttribArray(locParticle.a_alpha);
+      gl.disableVertexAttribArray(locParticle.a_corner);
     }
 
     // ------------------------------------------------------------------
