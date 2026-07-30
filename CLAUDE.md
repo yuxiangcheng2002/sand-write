@@ -44,6 +44,11 @@ TouchDesigner rendering. User is setting up a quick DB to persist sessions.
   monitor view only (record intact).
   Caveat: drawing by hand while a prebaked write is running interleaves
   stroke ids (shared counter) — dev-only concern.
+- **Replay (dev)**: Replay button loads a saved session JSONL and
+  re-performs it with original timing (rAF scheduler, catch-up loop) through
+  the same pipeline — sand redraws and TD gets a fresh live stream with new
+  stroke ids/clock. wave/clear rows re-trigger; session/resize are skipped.
+  Write/Replay/Stop are mutually exclusive.
 
 ## Testing
 

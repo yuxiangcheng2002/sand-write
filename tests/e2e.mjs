@@ -68,5 +68,15 @@ console.log('after prebaked write:', head2);
 const count2 = parseInt(head2.match(/(\d+) events/)[1], 10);
 if (count2 <= lines.length) throw new Error('prebaked writer produced no events');
 
+// Replay: feed the saved JSONL back in, expect it re-performed with timing.
+await page.setInputFiles('#devFile', out);
+await page.waitForTimeout(3500);
+const replay = await page.evaluate(() => ({
+  done: [...document.getElementById('devLog').children].some(d => d.textContent.includes('replay done')),
+  head: document.getElementById('devHead').textContent
+}));
+console.log('replay:', JSON.stringify(replay));
+if (!replay.done) throw new Error('replay did not finish');
+
 await browser.close();
 server.close();

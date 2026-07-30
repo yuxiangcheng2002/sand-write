@@ -173,8 +173,10 @@
       <input id="devText" type="text" placeholder="prebaked text" value="sand">
       <button id="devWrite">Write</button>
       <button id="devStop">Stop</button>
+      <button id="devReplay">Replay</button>
       <button id="devCopy">Copy</button>
       <button id="devClear">Wipe</button>
+      <input id="devFile" type="file" accept=".jsonl,.ndjson,.json,.txt" hidden>
     </div>
     <div id="devLog"></div>
   </div>
@@ -904,6 +906,7 @@
       }
 
       return {
+        note(msg) { mon.meta(msg); },
         start(uv) { strokeId++; push({ type: 'start', id: strokeId, x: +uv.x.toFixed(4), y: +uv.y.toFixed(4) }); },
         point(uv) { push({ type: 'point', id: strokeId, x: +uv.x.toFixed(4), y: +uv.y.toFixed(4) }); },
         end() { push({ type: 'end', id: strokeId }); },
@@ -1004,13 +1007,108 @@
       };
     })();
 
+    // ------------------------------------------------------------------
+    // Replay (dev tool)
+    //
+    // Re-performs a saved session JSONL with its original timing through
+    // the brush + recorder pipeline: the sand is redrawn and TD receives
+    // the gesture as a fresh live stream (new session clock, new stroke
+    // ids). session/resize rows are skipped; coordinates being normalized,
+    // a differing source aspect just stretches slightly.
+    // ------------------------------------------------------------------
+
+    const replayer = (() => {
+      const KINDS = ['start', 'point', 'end', 'wave', 'clear'];
+      let events = [];
+      let idx = 0;
+      let clock0 = 0;
+      let tOffset = 0;
+      let prev = null;
+      let active = false;
+
+      function stop() {
+        if (active && prev) rec.end();
+        active = false;
+        prev = null;
+        events = [];
+        idx = 0;
+      }
+
+      function load(text, name) {
+        writer.stop();
+        stop();
+        for (const line of text.split('\n')) {
+          const s = line.trim();
+          if (!s) continue;
+          try {
+            const ev = JSON.parse(s);
+            if (KINDS.includes(ev.type) && typeof ev.t === 'number') events.push(ev);
+          } catch (_) {}
+        }
+        if (!events.length) {
+          rec.note('replay: no drawable events in ' + name);
+          return;
+        }
+        events.sort((a, b) => a.t - b.t);
+        tOffset = events[0].t;
+        clock0 = performance.now();
+        active = true;
+        rec.note('replay ' + name + ': ' + events.length + ' events, ' +
+                 (events[events.length - 1].t - tOffset).toFixed(1) + 's');
+      }
+
+      function tick() {
+        if (!active) return;
+        const elapsed = (performance.now() - clock0) / 1000;
+        while (idx < events.length && events[idx].t - tOffset <= elapsed) {
+          const ev = events[idx++];
+          if (ev.type === 'start') {
+            prev = { x: ev.x, y: ev.y };
+            stampBrush(prev, BRUSH_STRENGTH);
+            rec.start(prev);
+          } else if (ev.type === 'point') {
+            const uv = { x: ev.x, y: ev.y };
+            if (prev) strokeBetween(prev, uv); else stampBrush(uv, BRUSH_STRENGTH);
+            prev = uv;
+            rec.point(uv);
+          } else if (ev.type === 'end') {
+            if (prev) rec.end();
+            prev = null;
+          } else if (ev.type === 'wave') {
+            startWave();
+          } else if (ev.type === 'clear') {
+            clearHeightfield();
+            rec.clear();
+          }
+        }
+        if (idx >= events.length) {
+          stop();
+          rec.note('replay done');
+        }
+      }
+
+      return { load, stop, tick };
+    })();
+
     if (new URLSearchParams(location.search).has('dev')) {
       const devText = document.getElementById('devText');
-      document.getElementById('devWrite').addEventListener('click', () => writer.write(devText.value));
+      const devFile = document.getElementById('devFile');
+      const startWrite = () => { replayer.stop(); writer.write(devText.value); };
+      document.getElementById('devWrite').addEventListener('click', startWrite);
       devText.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') writer.write(devText.value);
+        if (e.key === 'Enter') startWrite();
       });
-      document.getElementById('devStop').addEventListener('click', () => writer.stop());
+      document.getElementById('devStop').addEventListener('click', () => {
+        writer.stop();
+        replayer.stop();
+      });
+      document.getElementById('devReplay').addEventListener('click', () => devFile.click());
+      devFile.addEventListener('change', () => {
+        const f = devFile.files[0];
+        if (!f) return;
+        f.text().then(txt => replayer.load(txt, f.name));
+        devFile.value = '';
+      });
     }
 
     function onStart(e) {
@@ -1094,6 +1192,7 @@
     function loop(time) {
       updateWave();
       writer.tick();
+      replayer.tick();
       runSimPass(time * 0.001);
       renderPass(time * 0.001);
       requestAnimationFrame(loop);
