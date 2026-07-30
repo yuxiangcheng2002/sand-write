@@ -75,15 +75,30 @@
       padding: 8px 14px;
       border-radius: 999px;
     }
+    #tdDot {
+      position: fixed;
+      top: 14px;
+      right: 14px;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #b0413e;
+      box-shadow: 0 0 6px rgba(0,0,0,0.15);
+      z-index: 10;
+      transition: background 0.3s;
+    }
+    #tdDot.live { background: #4c9a5f; }
   </style>
 </head>
 <body>
   <div class="hint">Draw with your finger · Wave clears</div>
   <div id="fallback">WebGL 2 is not available on this device.</div>
   <canvas id="canvas"></canvas>
+  <div id="tdDot" title="TouchDesigner link"></div>
   <div class="controls">
     <button id="waveBtn">Wave</button>
     <button id="resetBtn">Clear</button>
+    <button id="saveBtn">Save</button>
   </div>
 
   <script>
@@ -673,11 +688,91 @@
       }
     }
 
+    // ------------------------------------------------------------------
+    // Recording + TouchDesigner link
+    //
+    // The writing process is recorded as a timestamped event stream
+    // (JSONL, one event per line) and simultaneously pushed to a
+    // TouchDesigner WebSocket DAT so TD can render the gesture live.
+    // Coordinates are normalized UV with y up; `t` is seconds since
+    // this session started. Override the TD endpoint with ?td=host:port.
+    // ------------------------------------------------------------------
+
+    const rec = (() => {
+      const sid = (crypto.randomUUID && crypto.randomUUID()) ||
+                  ('s-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
+      const t0 = performance.now();
+      const log = [];
+      let strokeId = 0;
+      let ws = null;
+
+      const tdParam = new URLSearchParams(location.search).get('td');
+      const tdUrl = 'ws://' + (tdParam || '127.0.0.1:9980');
+
+      function header() {
+        return {
+          type: 'session', sid,
+          aspect: +(window.innerWidth / window.innerHeight).toFixed(4),
+          brushRadius: BRUSH_RADIUS_UV,
+          yUp: true,
+          started: new Date().toISOString()
+        };
+      }
+
+      function send(ev) {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(ev));
+      }
+
+      function push(ev) {
+        ev.t = +(((performance.now() - t0) / 1000)).toFixed(3);
+        log.push(ev);
+        send(ev);
+        return ev;
+      }
+
+      function connect() {
+        try { ws = new WebSocket(tdUrl); } catch (_) { return; }
+        ws.onopen = () => {
+          document.getElementById('tdDot').classList.add('live');
+          send(header());
+        };
+        ws.onclose = ws.onerror = () => {
+          document.getElementById('tdDot').classList.remove('live');
+          ws = null;
+          setTimeout(connect, 2000);
+        };
+      }
+      connect();
+
+      log.push(header());
+
+      function save() {
+        const blob = new Blob([log.map(e => JSON.stringify(e)).join('\n') + '\n'],
+                              { type: 'application/x-ndjson' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'sand-' + sid.slice(0, 8) + '.jsonl';
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
+      return {
+        start(uv) { strokeId++; push({ type: 'start', id: strokeId, x: +uv.x.toFixed(4), y: +uv.y.toFixed(4) }); },
+        point(uv) { push({ type: 'point', id: strokeId, x: +uv.x.toFixed(4), y: +uv.y.toFixed(4) }); },
+        end() { push({ type: 'end', id: strokeId }); },
+        wave() { push({ type: 'wave' }); },
+        clear() { push({ type: 'clear' }); },
+        resize() { push({ type: 'resize', aspect: +(window.innerWidth / window.innerHeight).toFixed(4) }); },
+        save
+      };
+    })();
+
     function onStart(e) {
       e.preventDefault();
       isDrawing = true;
       lastUV = getUV(e);
       stampBrush(lastUV, BRUSH_STRENGTH);
+      rec.start(lastUV);
     }
 
     function onMove(e) {
@@ -686,11 +781,14 @@
       const uv = getUV(e);
       strokeBetween(lastUV, uv);
       lastUV = uv;
+      rec.point(uv);
     }
 
     function onEnd(e) {
+      if (!isDrawing) return;
       isDrawing = false;
       lastUV = null;
+      rec.end();
     }
 
     canvas.addEventListener('mousedown', onStart);
@@ -712,6 +810,7 @@
       if (waveActive) return;
       waveActive = true;
       waveY = 0.0;
+      rec.wave();
     }
 
     function updateWave() {
@@ -726,7 +825,11 @@
     }
 
     document.getElementById('waveBtn').addEventListener('click', startWave);
-    document.getElementById('resetBtn').addEventListener('click', clearHeightfield);
+    document.getElementById('resetBtn').addEventListener('click', () => {
+      clearHeightfield();
+      rec.clear();
+    });
+    document.getElementById('saveBtn').addEventListener('click', () => rec.save());
 
     // ------------------------------------------------------------------
     // Resize / loop
@@ -739,6 +842,7 @@
       canvas.style.width = window.innerWidth + 'px';
       canvas.style.height = window.innerHeight + 'px';
       initHeightfield();
+      rec.resize();
     }
 
     function loop(time) {

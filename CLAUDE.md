@@ -1,0 +1,49 @@
+# sand-write
+
+Single-file WebGL 2 sand-writing surface (`index.html`). Fingers/mouse carve
+grooves into a simulated sand heightfield; a wave sweep clears it.
+
+## Current goal
+
+Record the *process* of writing (not just the final image) and stream it to a
+TouchDesigner rendering. User is setting up a quick DB to persist sessions.
+
+## Key decisions
+
+- **Canonical record = timestamped vector event stream, not raster.** TD does
+  its own rendering, so it needs the gesture (when/where), not our pixels. The
+  heightfield is derived state. Vector JSONL is small, replayable at any speed,
+  resolution-independent.
+- **Schema** (one JSON event per line; `t` = seconds since session start,
+  x/y normalized UV with y **up**, aspect in header):
+  - `{"type":"session","sid",...,"aspect","brushRadius","yUp":true,"started"}`
+  - `{"type":"start"|"point"|"end","id":<strokeId>,"x","y","t"}`
+  - `{"type":"wave"|"clear","t"}` — so TD can mirror sand clearing
+  - `{"type":"resize","aspect","t"}`
+- **Transport = WebSocket direct to TD's WebSocket DAT** (TD as server,
+  default `ws://127.0.0.1:9980`, override with `?td=host:port`). Chosen over
+  OSC because the browser cannot send UDP — OSC would force a relay bridge.
+  Auto-reconnects every 2 s; header is re-sent on each (re)connect.
+- **Save button** downloads the full session as `sand-<sid>.jsonl` (for DB
+  ingestion / offline replay). Green/red dot top-right = TD link state.
+
+## Testing
+
+`tests/e2e.mjs` (record + save path) and `tests/e2e-ws.mjs` (live WS stream
+with a mock TD server). Run with `node tests/e2e-ws.mjs` after
+`npm install playwright ws --no-save`; they use the locally cached Playwright
+chromium (hardcoded executablePath). Sample output in
+`tests/output/sample-session.jsonl`.
+
+## Open questions / proposals (not yet approved)
+
+- Per-stroke heightfield PNG snapshot so TD can take groove shapes without
+  re-implementing the sim.
+- Point-stream thinning (dedupe/rAF throttle) if high-Hz mice flood the link.
+- DB ingestion endpoint (user said they'll set up a quick DB — format is
+  JSONL-ready, one row per event, `sid` in header).
+
+## Constraints
+
+- Demo stroke (`?demo`) bypasses input handlers, so it is *not* recorded.
+- iPad/touch is a target; keep `touch-action: none` and passive:false.
