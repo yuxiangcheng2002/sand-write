@@ -88,6 +88,47 @@
       transition: background 0.3s;
     }
     #tdDot.live { background: #4c9a5f; }
+    #devPanel {
+      position: fixed;
+      top: 34px;
+      right: 10px;
+      width: min(360px, 46vw);
+      max-height: 60vh;
+      display: none;
+      flex-direction: column;
+      background: rgba(20, 18, 14, 0.82);
+      border-radius: 10px;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.3);
+      z-index: 20;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.45;
+      color: #d8cfc0;
+      overflow: hidden;
+    }
+    #devPanel.open { display: flex; }
+    #devHead {
+      padding: 6px 10px;
+      background: rgba(255,255,255,0.08);
+      color: #f0e8d8;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: none;
+    }
+    #devLog {
+      overflow-y: auto;
+      padding: 6px 10px 8px;
+      pointer-events: auto;
+      touch-action: pan-y;
+      overscroll-behavior: contain;
+    }
+    #devLog div { white-space: pre; }
+    #devLog .ev-point { opacity: 0.55; }
+    #devLog .ev-start, #devLog .ev-end { color: #a8d8a8; }
+    #devLog .ev-wave, #devLog .ev-clear { color: #8ec7e8; }
+    #devLog .ev-session, #devLog .ev-resize { color: #e8c78e; }
+    #devLog .ev-meta { color: #c98a86; font-style: italic; }
   </style>
 </head>
 <body>
@@ -95,6 +136,10 @@
   <div id="fallback">WebGL 2 is not available on this device.</div>
   <canvas id="canvas"></canvas>
   <div id="tdDot" title="TouchDesigner link"></div>
+  <div id="devPanel">
+    <div id="devHead"></div>
+    <div id="devLog"></div>
+  </div>
   <div class="controls">
     <button id="waveBtn">Wave</button>
     <button id="resetBtn">Clear</button>
@@ -706,8 +751,47 @@
       let strokeId = 0;
       let ws = null;
 
-      const tdParam = new URLSearchParams(location.search).get('td');
-      const tdUrl = 'ws://' + (tdParam || '127.0.0.1:9980');
+      const params = new URLSearchParams(location.search);
+      const tdUrl = 'ws://' + (params.get('td') || '127.0.0.1:9980');
+
+      // Dev monitor (?dev): live tail of every JSON event + link status.
+      const mon = (() => {
+        const on = params.has('dev');
+        const panel = document.getElementById('devPanel');
+        const head = document.getElementById('devHead');
+        const logEl = document.getElementById('devLog');
+        const MAX_ROWS = 400;
+        let count = 0;
+        if (on) panel.classList.add('open');
+        document.getElementById('tdDot').addEventListener('click', () => {
+          if (on) panel.classList.toggle('open');
+        });
+
+        function updateHead() {
+          head.textContent = sid.slice(0, 8) + ' · ' + tdUrl + ' · ' + count + ' events';
+        }
+
+        function row(text, cls) {
+          if (!on) return;
+          const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 24;
+          const div = document.createElement('div');
+          div.className = cls;
+          div.textContent = text;
+          logEl.appendChild(div);
+          while (logEl.childElementCount > MAX_ROWS) logEl.firstElementChild.remove();
+          if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        return {
+          event(ev) {
+            if (!on) return;
+            count++;
+            updateHead();
+            row(JSON.stringify(ev), 'ev-' + ev.type);
+          },
+          meta(msg) { row('-- ' + msg, 'ev-meta'); }
+        };
+      })();
 
       function header() {
         return {
@@ -727,16 +811,23 @@
         ev.t = +(((performance.now() - t0) / 1000)).toFixed(3);
         log.push(ev);
         send(ev);
+        mon.event(ev);
         return ev;
       }
 
       function connect() {
         try { ws = new WebSocket(tdUrl); } catch (_) { return; }
+        let wasOpen = false;
         ws.onopen = () => {
+          wasOpen = true;
           document.getElementById('tdDot').classList.add('live');
+          mon.meta('ws open ' + tdUrl);
           send(header());
         };
-        ws.onclose = ws.onerror = () => {
+        // Reconnect from onclose only: a failed attempt fires error THEN
+        // close, and handling both would double the retries every cycle.
+        ws.onclose = () => {
+          if (wasOpen) mon.meta('ws closed, retrying every 2s');
           document.getElementById('tdDot').classList.remove('live');
           ws = null;
           setTimeout(connect, 2000);
@@ -744,7 +835,9 @@
       }
       connect();
 
-      log.push(header());
+      const h = header();
+      log.push(h);
+      mon.event(h);
 
       function save() {
         const blob = new Blob([log.map(e => JSON.stringify(e)).join('\n') + '\n'],

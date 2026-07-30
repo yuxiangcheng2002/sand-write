@@ -7,7 +7,8 @@ import path from 'path';
 
 const ROOT = '/Users/yxc/Repos/CMG/sand-write';
 const server = http.createServer((req, res) => {
-  const f = path.join(ROOT, req.url === '/' ? 'index.html' : req.url);
+  const p = new URL(req.url, 'http://x').pathname;
+  const f = path.join(ROOT, p === '/' ? 'index.html' : p);
   try { res.end(fs.readFileSync(f)); } catch { res.statusCode = 404; res.end(); }
 }).listen(8931);
 
@@ -16,7 +17,7 @@ const browser = await chromium.launch({
 });
 const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
 page.on('pageerror', e => console.log('PAGEERROR:', e.message));
-await page.goto('http://127.0.0.1:8931/');
+await page.goto('http://127.0.0.1:8931/?dev');
 await page.waitForTimeout(500);
 
 // stroke 1: horizontal drag
@@ -48,6 +49,15 @@ console.log(lines.slice(-4).join('\n'));
 const types = {};
 for (const l of lines) { const t = JSON.parse(l).type; types[t] = (types[t] || 0) + 1; }
 console.log('by type:', JSON.stringify(types));
+
+// Dev monitor should be open and mirror every event (+ possible ws meta rows).
+const dev = await page.evaluate(() => ({
+  open: document.getElementById('devPanel').classList.contains('open'),
+  rows: document.getElementById('devLog').childElementCount,
+  head: document.getElementById('devHead').textContent
+}));
+console.log('dev monitor:', JSON.stringify(dev));
+if (!dev.open || dev.rows < lines.length) throw new Error('dev monitor missing rows');
 
 await browser.close();
 server.close();

@@ -26,6 +26,14 @@ TouchDesigner rendering. User is setting up a quick DB to persist sessions.
   Auto-reconnects every 2 s; header is re-sent on each (re)connect.
 - **Save button** downloads the full session as `sand-<sid>.jsonl` (for DB
   ingestion / offline replay). Green/red dot top-right = TD link state.
+- **Dev mode (`?dev`)**: live monitor panel tailing every JSON event
+  (color-coded by type, points dimmed) plus ws open/close meta lines;
+  header shows sid, TD endpoint, event count. Capped at 400 DOM rows.
+  Tapping the TD dot toggles the panel. Composes with `?td=`, e.g.
+  `?dev&td=192.168.41.20:9980`.
+- Reconnect is driven from `onclose` only — a failed ws attempt fires error
+  then close, and handling both doubled the retry count every cycle
+  (fixed regression from the first recording commit).
 
 ## Testing
 

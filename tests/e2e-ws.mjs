@@ -8,7 +8,8 @@ import path from 'path';
 
 const ROOT = '/Users/yxc/Repos/CMG/sand-write';
 const server = http.createServer((req, res) => {
-  const f = path.join(ROOT, req.url === '/' ? 'index.html' : req.url);
+  const p = new URL(req.url, 'http://x').pathname;
+  const f = path.join(ROOT, p === '/' ? 'index.html' : p);
   try { res.end(fs.readFileSync(f)); } catch { res.statusCode = 404; res.end(); }
 }).listen(8932);
 
