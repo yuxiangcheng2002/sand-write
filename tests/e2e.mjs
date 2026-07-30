@@ -59,5 +59,14 @@ const dev = await page.evaluate(() => ({
 console.log('dev monitor:', JSON.stringify(dev));
 if (!dev.open || dev.rows < lines.length) throw new Error('dev monitor missing rows');
 
+// Prebaked writer: type "hi", click Write, expect synthetic stroke events.
+await page.fill('#devText', 'hi');
+await page.click('#devWrite');
+await page.waitForTimeout(4000);
+const head2 = await page.evaluate(() => document.getElementById('devHead').textContent);
+console.log('after prebaked write:', head2);
+const count2 = parseInt(head2.match(/(\d+) events/)[1], 10);
+if (count2 <= lines.length) throw new Error('prebaked writer produced no events');
+
 await browser.close();
 server.close();

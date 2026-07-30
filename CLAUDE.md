@@ -34,6 +34,16 @@ TouchDesigner rendering. User is setting up a quick DB to persist sessions.
 - Reconnect is driven from `onclose` only — a failed ws attempt fires error
   then close, and handling both doubled the retry count every cycle
   (fixed regression from the first recording commit).
+- **Prebaked writing (dev)**: Hershey "futural" single-stroke font embedded
+  as `HERSHEY` (~7 KB, ASCII 33+, converted from techninja/hersheytextjs).
+  Dev panel gets a text field + Write/Stop; glyph polylines are resampled
+  and replayed one sample per frame through the same brush + recorder
+  pipeline, so TD receives synthetic writing exactly like a human gesture.
+  Font units are squared in screen space via aspect; text auto-fits to 90%
+  width, centered. Copy = session JSONL to clipboard; Wipe = clears the
+  monitor view only (record intact).
+  Caveat: drawing by hand while a prebaked write is running interleaves
+  stroke ids (shared counter) — dev-only concern.
 
 ## Testing
 
