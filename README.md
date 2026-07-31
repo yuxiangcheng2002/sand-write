@@ -1,3 +1,10 @@
+> [!IMPORTANT]
+> **Migrated.** Development continues in
+> [Critical-Matter-MIT-Media-Lab/Future-Fest](https://github.com/Critical-Matter-MIT-Media-Lab/Future-Fest)
+> under `web/` (as of 2026-07-30). This repository is a frozen archive of the
+> standalone prototype and its commit history; the description below predates
+> the recording/TouchDesigner pipeline.
+
 <div align="center">
 
 # Sand Write

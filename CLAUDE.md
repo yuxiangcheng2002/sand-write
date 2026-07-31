@@ -1,10 +1,10 @@
 # sand-write
 
-> **2026-07-30**: This interface now also lives in the team repo
-> `Critical-Matter-MIT-Media-Lab/Future-Fest` under `web/` (pushed as
-> `8e38355`, snapshot of local `309c640`; tests there use relative paths +
-> optional `CHROMIUM_PATH`). Decide which copy is canonical before further
-> feature work to avoid a fork; until then this repo is the dev sandbox.
+> **2026-07-30 — MIGRATED, this repo is frozen.** Canonical home is
+> `Critical-Matter-MIT-Media-Lab/Future-Fest` under `web/` (local clone
+> `~/Repos/CMG/Future-Fest`); its CLAUDE.md carries the decision log.
+> Do not add features here. Pre-migration history stays in this repo;
+> the GitHub Pages demo still serves this frozen build.
 
 Single-file WebGL 2 sand-writing surface (`index.html`). Fingers/mouse carve
 grooves into a simulated sand heightfield; a wave sweep clears it.
