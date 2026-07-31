@@ -1,5 +1,11 @@
 # sand-write
 
+> **2026-07-30**: This interface now also lives in the team repo
+> `Critical-Matter-MIT-Media-Lab/Future-Fest` under `web/` (pushed as
+> `8e38355`, snapshot of local `309c640`; tests there use relative paths +
+> optional `CHROMIUM_PATH`). Decide which copy is canonical before further
+> feature work to avoid a fork; until then this repo is the dev sandbox.
+
 Single-file WebGL 2 sand-writing surface (`index.html`). Fingers/mouse carve
 grooves into a simulated sand heightfield; a wave sweep clears it.
 
